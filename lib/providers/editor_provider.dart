@@ -151,7 +151,9 @@ class EditorController extends StateNotifier<EditorState> {
           startMs: sourcePos,
           endMs: c.endMs,
           label: c.label,
+          track: c.track,
           speed: c.speed,
+          sourcePath: c.sourcePath,
         );
         final next = [...clips]
           ..removeAt(i)
@@ -179,10 +181,29 @@ class EditorController extends StateNotifier<EditorState> {
       startMs: sel.startMs,
       endMs: sel.endMs,
       label: sel.label,
+      track: sel.track,
       speed: sel.speed,
+      sourcePath: sel.sourcePath,
     );
     final next = [...state.timeline.clips]..insert(i + 1, dup);
     _commit(state.timeline.copyWith(clips: next), select: dup.id);
+  }
+
+  /// Appends a clip cut from [sourcePath] to the end of the video track. A
+  /// distinct [sourcePath] (different from the project's original) is exported
+  /// for real via the composer's multi-input path. Backward-compatible: a clip
+  /// whose [sourcePath] equals the project source falls back to input 0.
+  void addClip({required String sourcePath, required int sourceDurationMs, int track = 0}) {
+    final newClip = Clip(
+      id: 'clip_${DateTime.now().microsecondsSinceEpoch}',
+      startMs: 0,
+      endMs: sourceDurationMs.clamp(1, 1 << 31),
+      label: 'Clip',
+      track: track,
+      sourcePath: sourcePath,
+    );
+    final next = [...state.timeline.clips, newClip];
+    _commit(state.timeline.copyWith(clips: next), select: newClip.id);
   }
 
   void setSpeed(double speed) {

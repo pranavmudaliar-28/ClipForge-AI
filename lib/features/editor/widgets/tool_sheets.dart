@@ -238,21 +238,29 @@ Future<void> showEffectsSheet(BuildContext context, EditorController ctrl) {
 }
 
 // ── Text overlays ─────────────────────────────────────────────────────────────
-Future<void> showTextSheet(BuildContext context, EditorController ctrl) {
-  final controller = TextEditingController();
+/// Opens the text panel. Pass [editing] to edit an existing overlay in place
+/// (pre-fills the fields and calls [EditorController.updateText] on confirm);
+/// omit it to add a new overlay.
+Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOverlay? editing}) {
+  final controller = TextEditingController(text: editing?.text ?? '');
   const colors = ['#FFFFFF', '#000000', '#08D0F2', '#7C5CFF', '#FFD60A', '#FF453A', '#30D158'];
-  double size = 34;
-  double yNorm = 0.5;
-  String colorHex = '#FFFFFF';
+  double size = editing?.sizePt ?? 34;
+  double yNorm = editing?.yNorm ?? 0.5;
+  String colorHex = editing?.colorHex ?? '#FFFFFF';
   return edShowPanel(
     context,
     EdPanel(
-      title: 'Text',
+      title: editing == null ? 'Text' : 'Edit text',
       onConfirm: () {
-        if (controller.text.trim().isNotEmpty) {
+        final txt = controller.text.trim();
+        if (txt.isEmpty) return;
+        if (editing != null) {
+          // Preserve id + xNorm; update the edited fields.
+          ctrl.updateText(editing.copyWith(text: txt, yNorm: yNorm, sizePt: size, colorHex: colorHex));
+        } else {
           ctrl.addText(TextOverlay(
             id: 't_${DateTime.now().microsecondsSinceEpoch}',
-            text: controller.text.trim(),
+            text: txt,
             yNorm: yNorm,
             sizePt: size,
             colorHex: colorHex,

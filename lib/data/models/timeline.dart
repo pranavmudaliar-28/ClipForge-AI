@@ -15,6 +15,7 @@ class Clip {
     this.label = 'Clip',
     this.track = 0,
     this.speed = 1.0,
+    this.sourcePath,
   });
 
   final String id;
@@ -24,18 +25,24 @@ class Clip {
   final int track;
   final double speed; // 0.25–4.0
 
+  /// The media file this clip is cut from. `null` means it uses the project's
+  /// original source video (backward-compatible with pre-multi-source projects);
+  /// a non-null path lets distinct source files coexist on the same timeline.
+  final String? sourcePath;
+
   int get durationMs => (endMs - startMs).clamp(0, 1 << 31);
 
   /// Duration on the timeline after the speed factor is applied.
   int get playbackMs => (durationMs / speed).round();
 
-  Clip copyWith({int? startMs, int? endMs, String? label, double? speed}) => Clip(
+  Clip copyWith({int? startMs, int? endMs, String? label, double? speed, String? sourcePath}) => Clip(
         id: id,
         startMs: startMs ?? this.startMs,
         endMs: endMs ?? this.endMs,
         label: label ?? this.label,
         track: track,
         speed: speed ?? this.speed,
+        sourcePath: sourcePath ?? this.sourcePath,
       );
 
   factory Clip.fromJson(Map<String, dynamic> j) => Clip(
@@ -45,10 +52,18 @@ class Clip {
         label: j['label'] as String? ?? 'Clip',
         track: (j['track'] as num?)?.toInt() ?? 0,
         speed: (j['speed'] as num?)?.toDouble() ?? 1.0,
+        sourcePath: j['sourcePath'] as String?,
       );
 
-  Map<String, dynamic> toJson() =>
-      {'id': id, 'startMs': startMs, 'endMs': endMs, 'label': label, 'track': track, 'speed': speed};
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'startMs': startMs,
+        'endMs': endMs,
+        'label': label,
+        'track': track,
+        'speed': speed,
+        'sourcePath': sourcePath,
+      };
 }
 
 class CaptionCue {

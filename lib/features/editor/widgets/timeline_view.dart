@@ -6,10 +6,15 @@ import '../../../core/utils/formatters.dart';
 import '../../../data/models/timeline.dart';
 import '../editor_theme.dart';
 
-/// Horizontally-scrolling timeline strip (Twintra style): a time ruler above a
-/// clip track, with captions remapped onto the output timeline and a white
-/// playhead. Tap/drag to seek, tap a clip to select.
-class TimelineView extends StatelessWidget {
+/// Which kind of timeline item is currently highlighted (video clips are tracked
+/// via the provider's `selectedClipId`; these cover the read-through layers).
+enum _ItemKind { effect, audio, caption }
+
+/// Multi-track timeline (Twintra style): a shared time ruler above one row per
+/// video track index, then an effects row, one audio row per [AudioKind], and a
+/// caption row — all sharing one horizontal (time) scroll, with a white playhead
+/// pinned across every row. Scrolls horizontally by drag; tap to seek/select.
+class TimelineView extends StatefulWidget {
   const TimelineView({
     super.key,
     required this.timeline,
@@ -27,45 +32,67 @@ class TimelineView extends StatelessWidget {
   final ValueChanged<int> onSeek;
   final ValueChanged<String> onSelectClip;
 
-  static const double _clipH = 52;
-  static const double _capH = 22;
+  @override
+  State<TimelineView> createState() => _TimelineViewState();
+}
 
-  int get _outMs => math.max(timeline.playbackDurationMs, 1000);
-  double get _contentW => _outMs / 1000 * pxPerSecond;
+class _TimelineViewState extends State<TimelineView> {
+  static const double _rulerH = 16;
+  static const double _clipH = 46;
+  static const double _fxH = 22;
+  static const double _audH = 22;
+  static const double _capH = 20;
 
-  int _msFromDx(double dx) => ((dx / pxPerSecond) * 1000).round().clamp(0, _outMs);
+  // Selection for non-clip layers (clips use the provider's selectedClipId).
+  String? _selId;
+  _ItemKind? _selKind;
+
+  Timeline get _t => widget.timeline;
+  double get _pps => widget.pxPerSecond;
+  int get _outMs => math.max(_t.playbackDurationMs, 1000);
+  double get _contentW => _outMs / 1000 * _pps;
+
+  int _msFromDx(double dx) => ((dx / _pps) * 1000).round().clamp(0, _outMs);
+  double _x(int ms) => ms / 1000 * _pps;
+
+  void _selectItem(String id, _ItemKind kind) => setState(() {
+        _selId = id;
+        _selKind = kind;
+      });
 
   @override
   Widget build(BuildContext context) {
-    final playheadX = positionMs / 1000 * pxPerSecond;
+    final rows = <Widget>[
+      _ruler(),
+      ..._videoRows(),
+      if (_t.effects.isNotEmpty) _effectsRow(),
+      ..._audioRows(),
+      if (_t.captions.isNotEmpty) _captionRow(),
+    ];
+    final playheadX = _x(widget.positionMs).clamp(0.0, _contentW);
     return Container(
       color: Ed.bg,
       child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SizedBox(
-          width: _contentW + 48,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTapDown: (d) => onSeek(_msFromDx(d.localPosition.dx)),
-            onHorizontalDragUpdate: (d) => onSeek(_msFromDx(d.localPosition.dx)),
+        // Vertical scroll so extra tracks never overflow the fixed strip height.
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          // NOTE(Bug 3): no drag-to-seek gesture here, so this ScrollView owns
+          // horizontal drags (drag = scroll). Seeking is by tap only.
+          // TODO(playhead-arch): see Option B in master-prompt-fix-editor.md —
+          // pin the playhead to the viewport and derive positionMs from scroll.
+          child: SizedBox(
+            width: _contentW + 48,
             child: Stack(children: [
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                _ruler(),
-                const SizedBox(height: 4),
-                _videoTrack(),
-                const SizedBox(height: 4),
-                _captionTrack(),
-              ]),
-              // White playhead line + knob.
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: rows),
               Positioned(
-                left: playheadX.clamp(0, _contentW),
-                top: 18,
+                left: playheadX,
+                top: _rulerH,
                 bottom: 0,
                 child: Container(width: 2, color: Colors.white),
               ),
               Positioned(
-                left: (playheadX - 5).clamp(0, _contentW),
-                top: 14,
+                left: (playheadX - 5).clamp(0.0, _contentW),
+                top: _rulerH - 4,
                 child: Container(
                   width: 12,
                   height: 12,
@@ -79,37 +106,74 @@ class TimelineView extends StatelessWidget {
     );
   }
 
+  /// Transparent tap-to-seek background sized to a row.
+  Widget _seekBg(double height) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (d) => widget.onSeek(_msFromDx(d.localPosition.dx)),
+        child: SizedBox(width: _contentW, height: height),
+      );
+
+  Widget _rowFrame(double height, List<Widget> blocks) => SizedBox(
+        width: _contentW,
+        height: height,
+        child: Stack(children: [_seekBg(height), ...blocks]),
+      );
+
   Widget _ruler() {
     final totalSec = math.max(_outMs / 1000, 1).ceil();
-    return SizedBox(
-      height: 18,
-      child: Row(children: [
-        for (var s = 0; s <= totalSec; s += 2)
-          SizedBox(
-            width: pxPerSecond * 2,
-            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Container(width: 1, height: 6, color: Ed.muted),
-              const SizedBox(width: 3),
-              Text(Formatters.duration(s * 1000), style: const TextStyle(fontSize: 9, color: Ed.muted)),
-            ]),
-          ),
-      ]),
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (d) => widget.onSeek(_msFromDx(d.localPosition.dx)),
+      child: SizedBox(
+        height: _rulerH,
+        width: _contentW,
+        child: Row(children: [
+          for (var s = 0; s <= totalSec; s += 2)
+            SizedBox(
+              width: _pps * 2,
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Container(width: 1, height: 6, color: Ed.muted),
+                const SizedBox(width: 3),
+                Text(Formatters.duration(s * 1000), style: const TextStyle(fontSize: 9, color: Ed.muted)),
+              ]),
+            ),
+        ]),
+      ),
     );
   }
 
-  Widget _videoTrack() {
-    final blocks = <Widget>[];
+  /// One row per distinct video-track index. Clip x-positions come from the
+  /// global output order (clips concat in list order); [Clip.track] chooses row.
+  List<Widget> _videoRows() {
+    final byTrack = <int, List<_Placed>>{};
     var cursor = 0.0;
-    for (final clip in timeline.clips) {
-      final w = math.max(clip.playbackMs / 1000 * pxPerSecond, 28.0);
-      final selected = clip.id == selectedClipId;
+    for (final clip in _t.clips) {
+      final w = math.max(clip.playbackMs / 1000 * _pps, 28.0);
+      (byTrack[clip.track] ??= []).add(_Placed(clip.id, cursor, w, clip));
+      cursor += w;
+    }
+    final indexes = byTrack.keys.toList()..sort();
+    return [for (final ti in indexes) _videoRow(byTrack[ti]!)];
+  }
+
+  Widget _videoRow(List<_Placed> placed) {
+    final blocks = <Widget>[];
+    for (final p in placed) {
+      final clip = p.clip;
+      final selected = clip.id == widget.selectedClipId;
       blocks.add(Positioned(
-        left: cursor,
-        top: 0,
-        height: _clipH,
-        width: w - 2,
+        left: p.left,
+        top: 2,
+        height: _clipH - 4,
+        width: p.width - 2,
         child: GestureDetector(
-          onTap: () => onSelectClip(clip.id),
+          onTap: () {
+            widget.onSelectClip(clip.id);
+            setState(() {
+              _selId = null;
+              _selKind = null;
+            });
+          },
           child: Container(
             decoration: BoxDecoration(
               color: Ed.barAlt,
@@ -122,51 +186,167 @@ class TimelineView extends StatelessWidget {
               const Icon(Icons.movie_creation_outlined, size: 14, color: Ed.icon),
               const SizedBox(width: 4),
               if (clip.speed != 1.0)
-                Text('${clip.speed}x',
-                    style: const TextStyle(color: Ed.accent, fontSize: 10, fontWeight: FontWeight.w700))
+                Text('${clip.speed}x', style: const TextStyle(color: Ed.accent, fontSize: 10, fontWeight: FontWeight.w700))
               else
-                Text(Formatters.duration(clip.playbackMs),
-                    style: const TextStyle(color: Ed.muted, fontSize: 10)),
+                Text(Formatters.duration(clip.playbackMs), style: const TextStyle(color: Ed.muted, fontSize: 10)),
             ]),
           ),
         ),
       ));
-      cursor += w;
     }
-    return SizedBox(height: _clipH, width: _contentW, child: Stack(children: blocks));
+    return _rowFrame(_clipH, blocks);
   }
 
-  Widget _captionTrack() {
+  Widget _effectsRow() {
+    final blocks = <Widget>[
+      for (final e in _t.effects)
+        _layerBlock(
+          id: e.id,
+          kind: _ItemKind.effect,
+          left: _x(e.startMs),
+          width: math.max(_x(e.endMs) - _x(e.startMs), 16),
+          height: _fxH,
+          color: _fxColor(e.kind),
+          label: e.label,
+        ),
+    ];
+    return _rowFrame(_fxH, blocks);
+  }
+
+  /// One row per [AudioKind] present (Music / Voice / SFX are conceptually
+  /// separate tracks even though they share the [AudioLayer] model).
+  List<Widget> _audioRows() {
+    final byKind = <AudioKind, List<AudioLayer>>{};
+    for (final a in _t.audio) {
+      (byKind[a.kind] ??= []).add(a);
+    }
+    final kinds = byKind.keys.toList()..sort((a, b) => a.index.compareTo(b.index));
+    return [
+      for (final k in kinds)
+        _rowFrame(_audH, [
+          for (final a in byKind[k]!)
+            _layerBlock(
+              id: a.id,
+              kind: _ItemKind.audio,
+              left: _x(a.startMs),
+              width: math.max(_x(a.endMs) - _x(a.startMs), 16),
+              height: _audH,
+              color: _audColor(k),
+              label: a.label,
+              icon: _audIcon(k),
+            ),
+        ]),
+    ];
+  }
+
+  Widget _captionRow() {
     final blocks = <Widget>[];
     var cursor = 0;
-    for (final clip in timeline.clips) {
-      for (final cap in timeline.captions) {
+    for (final clip in _t.clips) {
+      for (final cap in _t.captions) {
         if (cap.endMs <= clip.startMs || cap.startMs >= clip.endMs) continue;
-        final s = cap.startMs.clamp(clip.startMs, clip.endMs);
-        final e = cap.endMs.clamp(clip.startMs, clip.endMs);
-        final outS = cursor + ((s - clip.startMs) / clip.speed).round();
-        final outE = cursor + ((e - clip.startMs) / clip.speed).round();
-        blocks.add(Positioned(
-          left: outS / 1000 * pxPerSecond,
-          top: 0,
-          height: _capH,
-          width: math.max((outE - outS) / 1000 * pxPerSecond, 16),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5),
-            decoration: BoxDecoration(
-              color: Ed.accent.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(5),
-            ),
-            alignment: Alignment.centerLeft,
-            child: Text(cap.text,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.w600)),
-          ),
-        ));
+        final cs = cap.startMs.clamp(clip.startMs, clip.endMs);
+        final ce = cap.endMs.clamp(clip.startMs, clip.endMs);
+        final os = cursor + ((cs - clip.startMs) / clip.speed).round();
+        final oe = cursor + ((ce - clip.startMs) / clip.speed).round();
+        blocks.add(_captionBlock('${cap.id}_$os', os, oe, cap.text));
       }
       cursor += clip.playbackMs;
     }
-    return SizedBox(height: _capH, width: _contentW, child: Stack(children: blocks));
+    return _rowFrame(_capH, blocks);
   }
+
+  Widget _captionBlock(String id, int os, int oe, String text) {
+    final selected = _selKind == _ItemKind.caption && _selId == id;
+    return Positioned(
+      left: _x(os),
+      top: 1,
+      height: _capH - 2,
+      width: math.max(_x(oe) - _x(os), 16),
+      child: GestureDetector(
+        onTap: () => _selectItem(id, _ItemKind.caption),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 5),
+          decoration: BoxDecoration(
+            color: Ed.accent.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(5),
+            border: selected ? Border.all(color: Colors.white, width: 1.4) : null,
+          ),
+          alignment: Alignment.centerLeft,
+          child: Text(text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.w600)),
+        ),
+      ),
+    );
+  }
+
+  Widget _layerBlock({
+    required String id,
+    required _ItemKind kind,
+    required double left,
+    required double width,
+    required double height,
+    required Color color,
+    required String label,
+    IconData? icon,
+  }) {
+    final selected = _selKind == kind && _selId == id;
+    return Positioned(
+      left: left,
+      top: 1,
+      height: height - 2,
+      width: width,
+      child: GestureDetector(
+        onTap: () => _selectItem(id, kind),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 5),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(5),
+            border: selected ? Border.all(color: Colors.white, width: 1.4) : null,
+          ),
+          alignment: Alignment.centerLeft,
+          child: Row(children: [
+            if (icon != null) ...[Icon(icon, size: 11, color: Colors.black), const SizedBox(width: 3)],
+            Flexible(
+              child: Text(label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.black, fontSize: 9, fontWeight: FontWeight.w600)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Color _fxColor(EffectKind k) => switch (k) {
+        EffectKind.zoom => const Color(0xFF7C5CFF),
+        EffectKind.transition => Ed.accent,
+        EffectKind.colorGrade => Ed.amber1,
+        EffectKind.bRoll => const Color(0xFF30D158),
+      };
+
+  Color _audColor(AudioKind k) => switch (k) {
+        AudioKind.music => Ed.addBlue,
+        AudioKind.voice => const Color(0xFF14B8A6),
+        AudioKind.sfx => const Color(0xFFFF6B6B),
+      };
+
+  IconData _audIcon(AudioKind k) => switch (k) {
+        AudioKind.music => Icons.music_note_rounded,
+        AudioKind.voice => Icons.mic_rounded,
+        AudioKind.sfx => Icons.graphic_eq_rounded,
+      };
+}
+
+/// A clip placed on the output timeline (x/width in px) for rendering.
+class _Placed {
+  const _Placed(this.id, this.left, this.width, this.clip);
+  final String id;
+  final double left;
+  final double width;
+  final Clip clip;
 }

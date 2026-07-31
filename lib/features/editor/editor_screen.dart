@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:ui' show ImageFilter;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,6 +32,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   bool _ready = false;
   bool _failed = false;
   bool _seeking = false;
+
+  // On-canvas text drag/pinch state (captured at gesture start).
+  Offset _txtStartFocal = Offset.zero;
+  double _txtStartX = 0.5, _txtStartY = 0.5, _txtStartSize = 34;
+  bool _txtMoved = false;
 
   EditorController get _ctrl => ref.read(editorControllerProvider(widget.projectId).notifier);
 
@@ -121,6 +127,37 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     await _ctrl.save();
     if (!mounted) return;
     context.push(AppRoutes.exportFor(widget.projectId));
+  }
+
+  /// Pick a video from the device, probe its real duration, and append it as a
+  /// new clip. Distinct source files export for real via the composer's
+  /// multi-input path. (This is "add clip" — duplication lives in the toolbar.)
+  Future<void> _addClip() async {
+    HapticFeedback.selectionClick();
+    final res = await FilePicker.platform.pickFiles(type: FileType.video);
+    final path = res?.files.single.path;
+    if (path == null) return; // user cancelled
+    if (!File(path).existsSync()) {
+      if (mounted) showAppToast(context, 'That file could not be found', type: ToastType.error);
+      return;
+    }
+    // Probe duration with video_player (already a dependency — no ffprobe call).
+    final probe = VideoPlayerController.file(File(path));
+    var durMs = 0;
+    try {
+      await probe.initialize();
+      durMs = probe.value.duration.inMilliseconds;
+    } catch (_) {
+      durMs = 0;
+    } finally {
+      await probe.dispose();
+    }
+    if (durMs <= 0) {
+      if (mounted) showAppToast(context, "Couldn't read that video's length", type: ToastType.error);
+      return;
+    }
+    _ctrl.addClip(sourcePath: path, sourceDurationMs: durMs);
+    if (mounted) showAppToast(context, 'Clip added', type: ToastType.success);
   }
 
   void _openFullscreen(CanvasPreset canvas, EditorState state) {
@@ -317,14 +354,43 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
           for (final t in s.texts)
             Align(
               alignment: Alignment(t.xNorm * 2 - 1, t.yNorm * 2 - 1),
-              child: Text(
-                t.text,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Color(int.parse('FF${t.colorHex.substring(1)}', radix: 16)),
-                  fontSize: (t.sizePt * textScale).clamp(8, 200),
-                  fontWeight: FontWeight.w800,
-                  shadows: const [Shadow(blurRadius: 4, color: Colors.black)],
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                // Tap to edit this text in place (pre-filled sheet).
+                onTap: () => showTextSheet(context, _ctrl, editing: t),
+                // Drag to move, pinch to resize — live during gesture, one undo
+                // step committed on release (mirrors the slider record:false/true
+                // pattern in editor_provider).
+                onScaleStart: (d) {
+                  _txtStartFocal = d.focalPoint;
+                  _txtStartX = t.xNorm;
+                  _txtStartY = t.yNorm;
+                  _txtStartSize = t.sizePt;
+                  _txtMoved = false;
+                },
+                onScaleUpdate: (d) {
+                  final dxN = (d.focalPoint.dx - _txtStartFocal.dx) / box.maxWidth;
+                  final dyN = (d.focalPoint.dy - _txtStartFocal.dy) / box.maxHeight;
+                  if (d.scale != 1.0 || dxN.abs() > 0.005 || dyN.abs() > 0.005) _txtMoved = true;
+                  final nx = (_txtStartX + dxN).clamp(0.02, 0.98);
+                  final ny = (_txtStartY + dyN).clamp(0.02, 0.98);
+                  final nSize = (_txtStartSize * d.scale).clamp(12.0, 160.0);
+                  _ctrl.updateText(t.copyWith(xNorm: nx, yNorm: ny, sizePt: nSize), record: false);
+                },
+                onScaleEnd: (_) {
+                  if (!_txtMoved) return;
+                  final cur = _ctrl.settings.texts.firstWhere((x) => x.id == t.id, orElse: () => t);
+                  _ctrl.updateText(cur);
+                },
+                child: Text(
+                  t.text,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(int.parse('FF${t.colorHex.substring(1)}', radix: 16)),
+                    fontSize: (t.sizePt * textScale).clamp(8, 200),
+                    fontWeight: FontWeight.w800,
+                    shadows: const [Shadow(blurRadius: 4, color: Colors.black)],
+                  ),
                 ),
               ),
             ),
@@ -423,20 +489,24 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   // ── Timeline block (+ add button · clips · add music) ────────────────────────
   Widget _timelineBlock(EditorState state) {
     return SizedBox(
-      height: 150,
+      height: 184,
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 30, 8, 0),
-          child: GestureDetector(
-            onTap: () {
-              HapticFeedback.selectionClick();
-              _ctrl.duplicateSelected();
-            },
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(color: Ed.addBlue, borderRadius: BorderRadius.circular(9)),
-              child: const Icon(Icons.add_rounded, color: Colors.white, size: 24),
+          child: Tooltip(
+            message: 'Add clip',
+            child: Semantics(
+              button: true,
+              label: 'Add clip',
+              child: GestureDetector(
+                onTap: _addClip,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(color: Ed.addBlue, borderRadius: BorderRadius.circular(9)),
+                  child: const Icon(Icons.add_rounded, color: Colors.white, size: 24),
+                ),
+              ),
             ),
           ),
         ),

@@ -36,17 +36,28 @@ abstract final class FfmpegComposer {
         : [Clip(id: 'c0', startMs: 0, endMs: timeline.durationMs)];
 
     final f = <String>[]; // filter_complex statements
-    final inputs = <String>["-i '$sourcePath'"];
+    // Resolve every distinct source file to an ffmpeg input index. Input 0 is
+    // always the project source, so single-source projects produce a command
+    // identical to before (zero change to the common path). Added clips with a
+    // distinct sourcePath get their own -i input and are trimmed from it.
+    final (sources, clipInput) = _resolveSources(sourcePath, clips);
+    final multi = sources.length > 1;
+    final inputs = <String>[for (final src in sources) "-i '$src'"];
 
     // 1) Per-clip trim + speed + normalise to canvas.
     for (var i = 0; i < clips.length; i++) {
       final c = clips[i];
+      final idx = clipInput[i];
       final inS = (c.startMs / 1000).toStringAsFixed(3);
       final outS = (c.endMs / 1000).toStringAsFixed(3);
       final pts = c.speed == 1.0 ? '' : 'setpts=PTS/${c.speed},';
-      f.add("[0:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
+      // Video normalise (scale/crop/fps/format) already makes clips concat-safe
+      // across sources; audio also needs resample+format when mixing sources so
+      // concat doesn't fail on differing sample rates/layouts.
+      final aNorm = multi ? ',aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo' : '';
+      f.add("[$idx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
           "scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p[v$i]");
-      f.add("[0:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}[a$i]");
+      f.add("[$idx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm[a$i]");
     }
 
     // 2) Assemble: xfade/acrossfade transitions, else concat.
@@ -127,8 +138,9 @@ abstract final class FfmpegComposer {
       aLab = 'apost';
     }
     if (s.audio.musicPath != null && File(s.audio.musicPath!).existsSync()) {
+      final musIdx = inputs.length; // music is the next input after all sources
       inputs.add("-i '${s.audio.musicPath}'");
-      f.add('[1:a]volume=${s.audio.musicVolume.toStringAsFixed(2)},aresample=44100[mus]');
+      f.add('[$musIdx:a]volume=${s.audio.musicVolume.toStringAsFixed(2)},aresample=44100[mus]');
       f.add('[$aLab][mus]amix=inputs=2:duration=first:dropout_transition=0[amix]');
       aLab = 'amix';
     }
@@ -160,15 +172,20 @@ abstract final class FfmpegComposer {
     final clips = timeline.clips.isNotEmpty
         ? timeline.clips
         : [Clip(id: 'c0', startMs: 0, endMs: timeline.durationMs)];
+    final (sources, clipInput) = _resolveSources(sourcePath, clips);
+    final multi = sources.length > 1;
+    final inputs = <String>[for (final src in sources) "-i '$src'"];
     final f = <String>[];
     for (var i = 0; i < clips.length; i++) {
       final c = clips[i];
+      final idx = clipInput[i];
       final inS = (c.startMs / 1000).toStringAsFixed(3);
       final outS = (c.endMs / 1000).toStringAsFixed(3);
       final pts = c.speed == 1.0 ? '' : 'setpts=PTS/${c.speed},';
-      f.add("[0:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
+      final aNorm = multi ? ',aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo' : '';
+      f.add("[$idx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
           "scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p[v$i]");
-      f.add("[0:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}[a$i]");
+      f.add("[$idx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm[a$i]");
     }
     String vLab, aLab;
     if (clips.length == 1) {
@@ -183,10 +200,30 @@ abstract final class FfmpegComposer {
       vLab = 'vc';
       aLab = 'ac';
     }
-    final command = "-y -i '$sourcePath' -filter_complex \"${f.join(';')}\" "
+    final command = "-y ${inputs.join(' ')} -filter_complex \"${f.join(';')}\" "
         "-map [$vLab] -map [$aLab] -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p "
         "-c:a aac -b:a 160k -movflags +faststart '$outputPath'";
     return RenderJob(command: command, totalMs: clips.fold<int>(0, (s, c) => s + c.playbackMs), outputPath: outputPath);
+  }
+
+  /// Maps each clip to an ffmpeg input index. Input 0 is always [projectSource];
+  /// every distinct [Clip.sourcePath] gets the next index. Returns the ordered
+  /// unique source paths and a per-clip input-index list (same length as clips).
+  static (List<String>, List<int>) _resolveSources(String projectSource, List<Clip> clips) {
+    final sources = <String>[projectSource];
+    final idxOf = <String, int>{projectSource: 0};
+    final perClip = <int>[];
+    for (final c in clips) {
+      final sp = (c.sourcePath == null || c.sourcePath!.isEmpty) ? projectSource : c.sourcePath!;
+      var idx = idxOf[sp];
+      if (idx == null) {
+        idx = sources.length;
+        sources.add(sp);
+        idxOf[sp] = idx;
+      }
+      perClip.add(idx);
+    }
+    return (sources, perClip);
   }
 
   static int _outMs(List<Clip> clips, EditSettings s) {
