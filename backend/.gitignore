@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime storage (uploaded media + extracted audio)
+storage/
+!storage/.gitkeep
+
+# Model caches
+.cache/
