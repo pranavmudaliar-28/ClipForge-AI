@@ -16,6 +16,7 @@ class Clip {
     this.track = 0,
     this.speed = 1.0,
     this.sourcePath,
+    this.hasAudio = true,
   });
 
   final String id;
@@ -30,12 +31,17 @@ class Clip {
   /// a non-null path lets distinct source files coexist on the same timeline.
   final String? sourcePath;
 
+  /// Whether the clip's source has an audio stream. Defaults to true (the
+  /// project source always has audio). Added clips probe this so the composer
+  /// can synthesize silence for muted sources instead of failing concat.
+  final bool hasAudio;
+
   int get durationMs => (endMs - startMs).clamp(0, 1 << 31);
 
   /// Duration on the timeline after the speed factor is applied.
   int get playbackMs => (durationMs / speed).round();
 
-  Clip copyWith({int? startMs, int? endMs, String? label, double? speed, String? sourcePath}) => Clip(
+  Clip copyWith({int? startMs, int? endMs, String? label, double? speed, String? sourcePath, bool? hasAudio}) => Clip(
         id: id,
         startMs: startMs ?? this.startMs,
         endMs: endMs ?? this.endMs,
@@ -43,6 +49,7 @@ class Clip {
         track: track,
         speed: speed ?? this.speed,
         sourcePath: sourcePath ?? this.sourcePath,
+        hasAudio: hasAudio ?? this.hasAudio,
       );
 
   factory Clip.fromJson(Map<String, dynamic> j) => Clip(
@@ -53,6 +60,7 @@ class Clip {
         track: (j['track'] as num?)?.toInt() ?? 0,
         speed: (j['speed'] as num?)?.toDouble() ?? 1.0,
         sourcePath: j['sourcePath'] as String?,
+        hasAudio: j['hasAudio'] as bool? ?? true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -63,6 +71,7 @@ class Clip {
         'track': track,
         'speed': speed,
         'sourcePath': sourcePath,
+        'hasAudio': hasAudio,
       };
 }
 

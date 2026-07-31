@@ -13,6 +13,7 @@ import '../../core/utils/formatters.dart';
 import '../../core/widgets/app_toast.dart';
 import '../../data/models/canvas_preset.dart';
 import '../../data/models/timeline.dart';
+import '../../providers/app_providers.dart';
 import '../../providers/editor_provider.dart';
 import '../../providers/projects_provider.dart';
 import 'editor_theme.dart';
@@ -156,7 +157,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
       if (mounted) showAppToast(context, "Couldn't read that video's length", type: ToastType.error);
       return;
     }
-    _ctrl.addClip(sourcePath: path, sourceDurationMs: durMs);
+    // Probe for an audio track so the composer can synthesize silence for a
+    // muted source instead of failing the concat on export.
+    final hasAudio = await ref.read(ffmpegServiceProvider).hasAudioStream(path);
+    _ctrl.addClip(sourcePath: path, sourceDurationMs: durMs, hasAudio: hasAudio);
     if (mounted) showAppToast(context, 'Clip added', type: ToastType.success);
   }
 

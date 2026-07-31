@@ -78,8 +78,8 @@ class _TimelineViewState extends State<TimelineView> {
           scrollDirection: Axis.horizontal,
           // NOTE(Bug 3): no drag-to-seek gesture here, so this ScrollView owns
           // horizontal drags (drag = scroll). Seeking is by tap only.
-          // TODO(playhead-arch): see Option B in master-prompt-fix-editor.md —
-          // pin the playhead to the viewport and derive positionMs from scroll.
+          // Future (playhead-arch): pin the playhead to the viewport and derive
+          // positionMs from the scroll offset (Option B in master-prompt-fix-editor.md).
           child: SizedBox(
             width: _contentW + 48,
             child: Stack(children: [

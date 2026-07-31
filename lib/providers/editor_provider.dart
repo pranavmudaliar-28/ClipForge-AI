@@ -154,6 +154,7 @@ class EditorController extends StateNotifier<EditorState> {
           track: c.track,
           speed: c.speed,
           sourcePath: c.sourcePath,
+          hasAudio: c.hasAudio,
         );
         final next = [...clips]
           ..removeAt(i)
@@ -184,6 +185,7 @@ class EditorController extends StateNotifier<EditorState> {
       track: sel.track,
       speed: sel.speed,
       sourcePath: sel.sourcePath,
+      hasAudio: sel.hasAudio,
     );
     final next = [...state.timeline.clips]..insert(i + 1, dup);
     _commit(state.timeline.copyWith(clips: next), select: dup.id);
@@ -193,7 +195,7 @@ class EditorController extends StateNotifier<EditorState> {
   /// distinct [sourcePath] (different from the project's original) is exported
   /// for real via the composer's multi-input path. Backward-compatible: a clip
   /// whose [sourcePath] equals the project source falls back to input 0.
-  void addClip({required String sourcePath, required int sourceDurationMs, int track = 0}) {
+  void addClip({required String sourcePath, required int sourceDurationMs, int track = 0, bool hasAudio = true}) {
     final newClip = Clip(
       id: 'clip_${DateTime.now().microsecondsSinceEpoch}',
       startMs: 0,
@@ -201,6 +203,7 @@ class EditorController extends StateNotifier<EditorState> {
       label: 'Clip',
       track: track,
       sourcePath: sourcePath,
+      hasAudio: hasAudio,
     );
     final next = [...state.timeline.clips, newClip];
     _commit(state.timeline.copyWith(clips: next), select: newClip.id);

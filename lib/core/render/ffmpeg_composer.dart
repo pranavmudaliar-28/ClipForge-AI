@@ -57,7 +57,7 @@ abstract final class FfmpegComposer {
       final aNorm = multi ? ',aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo' : '';
       f.add("[$idx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
           "scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p[v$i]");
-      f.add("[$idx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm[a$i]");
+      f.add(_clipAudio(c, idx, i, inS, outS, aNorm));
     }
 
     // 2) Assemble: xfade/acrossfade transitions, else concat.
@@ -185,7 +185,7 @@ abstract final class FfmpegComposer {
       final aNorm = multi ? ',aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo' : '';
       f.add("[$idx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
           "scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p[v$i]");
-      f.add("[$idx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm[a$i]");
+      f.add(_clipAudio(c, idx, i, inS, outS, aNorm));
     }
     String vLab, aLab;
     if (clips.length == 1) {
@@ -266,6 +266,17 @@ abstract final class FfmpegComposer {
       accMs = accMs + clips[i].playbackMs - tMs;
     }
     return (vPrev, aPrev);
+  }
+
+  /// Per-clip audio: the source's audio when present, otherwise synthesized
+  /// silence of the clip's output length so concat never fails on a muted clip.
+  static String _clipAudio(Clip c, int inputIdx, int labelIdx, String inS, String outS, String aNorm) {
+    if (c.hasAudio) {
+      return "[$inputIdx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm[a$labelIdx]";
+    }
+    final durSec = (c.playbackMs / 1000).toStringAsFixed(3);
+    return "anullsrc=r=44100:cl=stereo,atrim=0:$durSec,asetpts=PTS-STARTPTS,"
+        "aformat=sample_fmts=fltp:channel_layouts=stereo[a$labelIdx]";
   }
 
   static String _atempo(double speed) {

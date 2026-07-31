@@ -44,6 +44,23 @@ class FfmpegService {
     await FFmpegKit.cancel();
   }
 
+  /// Returns true if [source] has at least one audio stream. Reads just the
+  /// container header (processes 0.1s), so it's fast. Used before adding a clip
+  /// so the composer can synthesize silence for sources with no audio track
+  /// (otherwise concat, which needs audio on every segment, would fail).
+  Future<bool> hasAudioStream(String source) async {
+    var found = false;
+    final re = RegExp(r'Stream #\d+:\d+.*: Audio:');
+    await run(
+      "-hide_banner -i '$source' -t 0.1 -f null -",
+      totalMs: 0,
+      onLog: (line) {
+        if (re.hasMatch(line)) found = true;
+      },
+    );
+    return found;
+  }
+
   /// Extracts a single frame at [atMs] to [outPath] (used for thumbnails).
   Future<bool> extractFrame(String source, int atMs, String outPath) async {
     final t = (atMs / 1000).toStringAsFixed(2);
