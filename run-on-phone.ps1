@@ -60,6 +60,15 @@ Write-Host "Target: $DeviceId" -ForegroundColor Cyan
 & $adb -s $DeviceId reverse tcp:8000 tcp:8000 | Out-Null
 Write-Host "adb reverse 8000 set (start backend with backend/run.ps1)" -ForegroundColor Cyan
 
+# 3b) Keep the phone awake during the transfer. On Wi-Fi ADB, the ~356 MB APK push
+#     takes long enough that screen-sleep / Wi-Fi power-save drops the TCP socket
+#     mid-copy ("failed to read copy response: EOF" -> device offline), so the
+#     copy never commits. Waking + stay-on + a long screen timeout holds the link.
+& $adb -s $DeviceId shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null
+& $adb -s $DeviceId shell svc power stayon true 2>$null | Out-Null
+& $adb -s $DeviceId shell settings put system screen_off_timeout 1800000 2>$null | Out-Null
+Write-Host "phone kept awake for the transfer" -ForegroundColor Cyan
+
 # 4) Build (unless skipped).
 $apk = Join-Path $PSScriptRoot "build\app\outputs\flutter-apk\app-debug.apk"
 if (-not $SkipBuild) {
