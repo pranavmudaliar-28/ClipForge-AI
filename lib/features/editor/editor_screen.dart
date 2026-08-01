@@ -1,12 +1,13 @@
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' show ImageFilter;
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../core/router/app_routes.dart';
@@ -14,6 +15,7 @@ import '../../core/utils/formatters.dart';
 import '../../core/widgets/app_toast.dart';
 import '../../data/models/canvas_preset.dart';
 import '../../data/models/edit_settings.dart';
+import '../../data/models/overlay_object.dart';
 import '../../data/models/timeline.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/editor_provider.dart';
@@ -46,7 +48,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   // _gizMode: 0 none · 1 move · 2 scale · 3 rotate.
   int _gizMode = 0;
   Offset _gizStartPointer = Offset.zero;
-  double _gizStartX = 0.5, _gizStartY = 0.5, _gizStartSize = 34, _gizStartRot = 0;
+  double _gizStartX = 0.5, _gizStartY = 0.5, _gizStartScale = 34, _gizStartRot = 0;
   double _gizStartDist = 1, _gizStartAngle = 0;
   bool _gizChanged = false;
 
@@ -232,6 +234,90 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     if (mounted) showAppToast(context, 'Clip added', type: ToastType.success);
   }
 
+  /// Picks an image and returns (path, aspect=width/height), or null if cancelled.
+  Future<(String, double)?> _pickImageWithAspect() async {
+    final res = await FilePicker.platform.pickFiles(type: FileType.image);
+    final path = res?.files.single.path;
+    if (path == null || !File(path).existsSync()) return null;
+    var aspect = 1.0;
+    try {
+      final bytes = await File(path).readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      if (img.height > 0) aspect = img.width / img.height;
+      img.dispose();
+    } catch (_) {}
+    return (path, aspect);
+  }
+
+  /// Rasterizes an emoji glyph to a square PNG in app documents (persistent so it
+  /// survives for export), returning its path. No bundled sticker assets needed.
+  Future<String> _renderEmojiPng(String emoji, {int size = 256}) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final tp = TextPainter(
+      text: TextSpan(text: emoji, style: TextStyle(fontSize: size * 0.78)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(size, size);
+    final data = await img.toByteData(format: ui.ImageByteFormat.png);
+    img.dispose();
+    picture.dispose();
+    final dir = await getApplicationDocumentsDirectory();
+    final stickers = Directory('${dir.path}/stickers');
+    if (!stickers.existsSync()) stickers.createSync(recursive: true);
+    final file = File('${stickers.path}/sticker_${DateTime.now().microsecondsSinceEpoch}.png');
+    await file.writeAsBytes(data!.buffer.asUint8List());
+    return file.path;
+  }
+
+  Future<void> _addImageOverlay() async {
+    HapticFeedback.selectionClick();
+    final picked = await _pickImageWithAspect();
+    if (picked == null) return;
+    _ctrl.addOverlay(OverlayObject(
+      id: 'ov_${DateTime.now().microsecondsSinceEpoch}',
+      kind: OverlayKind.image,
+      sourcePath: picked.$1,
+      aspect: picked.$2,
+      wNorm: 0.5,
+    ));
+    if (mounted) showAppToast(context, 'Image added', type: ToastType.success);
+  }
+
+  Future<void> _addSticker() async {
+    HapticFeedback.selectionClick();
+    final emoji = await showStickerPicker(context);
+    if (emoji == null) return;
+    final path = await _renderEmojiPng(emoji);
+    _ctrl.addOverlay(OverlayObject(
+      id: 'ov_${DateTime.now().microsecondsSinceEpoch}',
+      kind: OverlayKind.sticker,
+      sourcePath: path,
+      aspect: 1.0,
+      wNorm: 0.25,
+    ));
+    if (mounted) showAppToast(context, 'Sticker added', type: ToastType.success);
+  }
+
+  Future<void> _replaceOverlay() async {
+    final o = _ctrl.selectedOverlay;
+    if (o == null) return;
+    if (o.kind == OverlayKind.sticker) {
+      final emoji = await showStickerPicker(context);
+      if (emoji == null) return;
+      final path = await _renderEmojiPng(emoji);
+      _ctrl.updateOverlay(o.copyWith(sourcePath: path, aspect: 1.0));
+    } else {
+      final picked = await _pickImageWithAspect();
+      if (picked == null) return;
+      _ctrl.updateOverlay(o.copyWith(sourcePath: picked.$1, aspect: picked.$2));
+    }
+  }
+
   void _openFullscreen(CanvasPreset canvas, EditorState state) {
     final v = _video;
     if (v == null) return;
@@ -300,6 +386,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         return _clipTools(state);
       case SelectionKind.text:
         return _textTools();
+      case SelectionKind.overlay:
+        return _overlayTools();
       case SelectionKind.none:
       case SelectionKind.caption:
       case SelectionKind.audioLayer:
@@ -307,9 +395,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     }
   }
 
-  // No selection → project-level tools (add media, text, audio, canvas, looks, AI).
+  // No selection → project-level tools (add media/overlay/sticker/text/audio, looks, AI).
   List<(IconData, String, VoidCallback)> _globalTools(EditorState state) => [
         (Icons.add_photo_alternate_outlined, 'Add', _addClip),
+        (Icons.image_outlined, 'Overlay', _addImageOverlay),
+        (Icons.emoji_emotions_outlined, 'Sticker', _addSticker),
         (Icons.text_fields_rounded, 'Text', () => showTextSheet(context, _ctrl)),
         (Icons.volume_up_outlined, 'Audio', () => showAudioSheet(context, _ctrl)),
         (Icons.crop_free_rounded, 'Canvas', () => showCanvasSheet(context, state.canvasId, _ctrl.setCanvas)),
@@ -318,6 +408,21 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         (Icons.blur_on_rounded, 'Effects', () => showEffectsSheet(context, _ctrl)),
         (Icons.subtitles_outlined, 'Captions', () => showCaptionsSheet(context, _ctrl)),
         (Icons.auto_fix_high_rounded, 'AI Tools', _openAiTools),
+      ];
+
+  // An image/sticker overlay is selected → edit / replace / duplicate / delete.
+  // (Move/scale/rotate happen on the canvas gizmo.)
+  List<(IconData, String, VoidCallback)> _overlayTools() => [
+        (Icons.tune_rounded, 'Edit', () => showOverlaySheet(context, _ctrl)),
+        (Icons.swap_horiz_rounded, 'Replace', _replaceOverlay),
+        (Icons.copy_rounded, 'Duplicate', () {
+          final o = _ctrl.selectedOverlay;
+          if (o != null) _ctrl.duplicateOverlay(o.id);
+        }),
+        (Icons.delete_outline_rounded, 'Delete', () {
+          final o = _ctrl.selectedOverlay;
+          if (o != null) _ctrl.removeOverlay(o.id);
+        }),
       ];
 
   // A video clip is selected → clip operations + timeline-wide looks.
@@ -438,7 +543,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         v = ColorFiltered(colorFilter: ColorFilter.matrix(s.previewMatrix()), child: v);
         if (s.previewBlurSigma > 0) {
           v = ImageFiltered(
-            imageFilter: ImageFilter.blur(sigmaX: s.previewBlurSigma, sigmaY: s.previewBlurSigma),
+            imageFilter: ui.ImageFilter.blur(sigmaX: s.previewBlurSigma, sigmaY: s.previewBlurSigma),
             child: v,
           );
         }
@@ -462,16 +567,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
       final textScale = (box.maxHeight.isFinite && box.maxHeight > 0 && canvas.exportH > 0)
           ? box.maxHeight / canvas.exportH
           : 0.2;
-      // The currently-selected text overlay (if any) drives the canvas gizmo.
-      TextOverlay? selText;
-      if (state.selection.kind == SelectionKind.text) {
-        for (final t in s.texts) {
-          if (t.id == state.selection.id) {
-            selText = t;
-            break;
-          }
-        }
-      }
+      // Image/sticker overlays, drawn back-to-front by z; text sits above them.
+      final overlays = [...state.timeline.overlays]..sort((a, b) => a.z.compareTo(b.z));
+      // A selected text OR overlay drives the canvas gizmo.
+      final hasGizmo =
+          state.selection.kind == SelectionKind.text || state.selection.kind == SelectionKind.overlay;
 
       return GestureDetector(
         onTap: () {
@@ -498,9 +598,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
               ),
             ),
           if (_video != null) _captionOverlay(state),
-          // Play indicator is drawn BELOW the text overlays so a centered text
+          // Play indicator is drawn BELOW the overlays/text so a centered element
           // isn't hidden behind it while paused; IgnorePointer so taps fall
-          // through to play/text handlers.
+          // through to play/select handlers.
           if (_video != null && !_video!.value.isPlaying)
             IgnorePointer(
               child: Center(
@@ -512,14 +612,16 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                 ),
               ),
             ),
-          // Text overlays (rotation + opacity match export). Unselected text is
-          // time-gated to its window; the selected one always shows so it stays
-          // editable even when the playhead is outside its range. Tap selects.
+          // Image/sticker overlays (below text), time-gated; tap selects.
+          for (final o in overlays)
+            if (_shouldShowOverlay(o, state)) _overlayDisplay(o, box),
+          // Text overlays (rotation + opacity match export). Unselected is
+          // time-gated; the selected one always shows so it stays editable.
           for (final t in s.texts)
             if (_shouldShowText(t, state)) _textDisplay(t, textScale),
-          // Selection gizmo (canvas-spanning gesture layer + painted handles),
-          // active only while a text is selected.
-          if (selText != null) _gizmoLayer(selText, box, textScale, s.texts),
+          // Unified selection gizmo (canvas-spanning gesture layer + handles),
+          // active while a text or overlay is selected.
+          if (hasGizmo) _gizmoLayer(state, box, textScale),
         ]),
       );
     });
@@ -549,11 +651,17 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     return w;
   }
 
-  // ── Canvas text display + selection gizmo ────────────────────────────────────
+  // ── Canvas overlays/text display + unified selection gizmo ──────────────────
   bool _shouldShowText(TextOverlay t, EditorState state) {
     if (state.selection.kind == SelectionKind.text && state.selection.id == t.id) return true;
     final end = t.effectiveEndMs(state.outputMs);
     return state.positionMs >= t.startMs && state.positionMs < end;
+  }
+
+  bool _shouldShowOverlay(OverlayObject o, EditorState state) {
+    if (state.selection.kind == SelectionKind.overlay && state.selection.id == o.id) return true;
+    final end = o.effectiveEndMs(state.outputMs);
+    return state.positionMs >= o.startMs && state.positionMs < end;
   }
 
   Widget _textDisplay(TextOverlay t, double textScale) {
@@ -583,8 +691,34 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     );
   }
 
-  /// Measured pixel size of an overlay's text at the current preview scale (used
-  /// to size the gizmo box and to hit-test taps).
+  Widget _overlayDisplay(OverlayObject o, BoxConstraints box) {
+    final asp = o.aspect <= 0 ? 1.0 : o.aspect;
+    final wpx = (o.wNorm * box.maxWidth).clamp(8.0, box.maxWidth * 2);
+    final hpx = wpx / asp;
+    final exists = o.sourcePath.isNotEmpty && File(o.sourcePath).existsSync();
+    return Align(
+      alignment: Alignment(o.xNorm * 2 - 1, o.yNorm * 2 - 1),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _ctrl.selectOverlay(o.id),
+        child: Opacity(
+          opacity: o.opacity.clamp(0.0, 1.0),
+          child: Transform.rotate(
+            angle: o.rotationDeg * math.pi / 180,
+            child: SizedBox(
+              width: wpx,
+              height: hpx,
+              child: exists
+                  ? Image.file(File(o.sourcePath), fit: BoxFit.fill, filterQuality: FilterQuality.medium)
+                  : const ColoredBox(color: Colors.white24),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Measured pixel size of a text overlay at the current preview scale.
   Size _measureText(String text, double fontSize, double maxWidth) {
     final tp = TextPainter(
       text: TextSpan(text: text.isEmpty ? ' ' : text, style: TextStyle(fontSize: fontSize, fontWeight: FontWeight.w800)),
@@ -594,6 +728,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     return tp.size;
   }
 
+  /// On-canvas box (incl. padding) for a text overlay's gizmo + hit-test.
   Size _gizBoxSize(TextOverlay t, double textScale, BoxConstraints box) {
     final fontSize = (t.sizePt * textScale).clamp(8.0, 200.0);
     final sz = _measureText(t.text, fontSize, box.maxWidth);
@@ -601,27 +736,50 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     return Size((sz.width + pad * 2).clamp(24.0, box.maxWidth), (sz.height + pad * 2).clamp(20.0, box.maxHeight));
   }
 
-  Widget _gizmoLayer(TextOverlay t, BoxConstraints box, double textScale, List<TextOverlay> texts) {
+  /// On-canvas box (incl. padding) for an image/sticker overlay.
+  Size _overlayBoxSize(OverlayObject o, BoxConstraints box) {
+    final asp = o.aspect <= 0 ? 1.0 : o.aspect;
+    final wpx = (o.wNorm * box.maxWidth).clamp(24.0, box.maxWidth);
+    final hpx = (wpx / asp).clamp(20.0, box.maxHeight);
+    const pad = 6.0;
+    return Size(wpx + pad, hpx + pad);
+  }
+
+  /// Geometry of the currently-selected transformable object (text or overlay).
+  ({Offset center, double rotDeg, Size box})? _gizGeom(EditorState state, BoxConstraints c, double textScale) {
+    final w = c.maxWidth, h = c.maxHeight;
+    if (state.selection.kind == SelectionKind.text) {
+      final t = _ctrl.selectedText;
+      if (t == null) return null;
+      return (center: Offset(t.xNorm * w, t.yNorm * h), rotDeg: t.rotationDeg, box: _gizBoxSize(t, textScale, c));
+    }
+    if (state.selection.kind == SelectionKind.overlay) {
+      final o = _ctrl.selectedOverlay;
+      if (o == null) return null;
+      return (center: Offset(o.xNorm * w, o.yNorm * h), rotDeg: o.rotationDeg, box: _overlayBoxSize(o, c));
+    }
+    return null;
+  }
+
+  Widget _gizmoLayer(EditorState state, BoxConstraints box, double textScale) {
+    final g = _gizGeom(state, box, textScale);
+    if (g == null) return const SizedBox.shrink();
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTapUp: (d) {
-          final hit = _hitText(d.localPosition, texts, box, textScale);
+          final hit = _hitTest(d.localPosition, state, box, textScale);
           if (hit == null) {
             _ctrl.clearSelection();
-          } else if (hit != t.id) {
-            _ctrl.selectText(hit);
+          } else if (!(hit.kind == state.selection.kind && hit.id == state.selection.id)) {
+            _ctrl.selectItem(hit.kind, hit.id!);
           }
         },
-        onPanStart: (d) => _gizPanStart(t, d.localPosition, box, textScale),
+        onPanStart: (d) => _gizPanStart(state, d.localPosition, box, textScale),
         onPanUpdate: (d) => _gizPanUpdate(d.localPosition, box),
         onPanEnd: (_) => _gizPanEnd(),
         child: CustomPaint(
-          painter: _GizmoPainter(
-            center: Offset(t.xNorm * box.maxWidth, t.yNorm * box.maxHeight),
-            boxSize: _gizBoxSize(t, textScale, box),
-            rotationDeg: t.rotationDeg,
-          ),
+          painter: _GizmoPainter(center: g.center, boxSize: g.box, rotationDeg: g.rotDeg),
         ),
       ),
     );
@@ -633,30 +791,49 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     return Offset(d.dx * ca + d.dy * sa, -d.dx * sa + d.dy * ca);
   }
 
-  /// The topmost text overlay whose (rotated) box contains [local], or null.
-  String? _hitText(Offset local, List<TextOverlay> texts, BoxConstraints box, double textScale) {
+  /// Topmost text (drawn above overlays), then topmost overlay (by z), whose
+  /// rotated box contains [local]. Returns a Selection or null.
+  Selection? _hitTest(Offset local, EditorState state, BoxConstraints box, double textScale) {
     final w = box.maxWidth, h = box.maxHeight;
+    final texts = state.timeline.settings.texts;
     for (var i = texts.length - 1; i >= 0; i--) {
       final t = texts[i];
-      final center = Offset(t.xNorm * w, t.yNorm * h);
-      final u = _unrotate(local - center, t.rotationDeg * math.pi / 180);
+      final u = _unrotate(local - Offset(t.xNorm * w, t.yNorm * h), t.rotationDeg * math.pi / 180);
       final sz = _gizBoxSize(t, textScale, box);
-      if (u.dx.abs() <= sz.width / 2 && u.dy.abs() <= sz.height / 2) return t.id;
+      if (u.dx.abs() <= sz.width / 2 && u.dy.abs() <= sz.height / 2) return Selection(SelectionKind.text, t.id);
+    }
+    final overlays = [...state.timeline.overlays]..sort((a, b) => b.z.compareTo(a.z));
+    for (final o in overlays) {
+      final u = _unrotate(local - Offset(o.xNorm * w, o.yNorm * h), o.rotationDeg * math.pi / 180);
+      final sz = _overlayBoxSize(o, box);
+      if (u.dx.abs() <= sz.width / 2 && u.dy.abs() <= sz.height / 2) return Selection(SelectionKind.overlay, o.id);
     }
     return null;
   }
 
-  void _gizPanStart(TextOverlay t, Offset local, BoxConstraints box, double textScale) {
+  double _selectedScaleRef() {
+    final t = _ctrl.selectedText;
+    if (t != null) return t.sizePt;
+    final o = _ctrl.selectedOverlay;
+    if (o != null) return o.wNorm;
+    return 1;
+  }
+
+  void _gizPanStart(EditorState state, Offset local, BoxConstraints box, double textScale) {
+    final g = _gizGeom(state, box, textScale);
+    if (g == null) {
+      _gizMode = 0;
+      return;
+    }
     final w = box.maxWidth, h = box.maxHeight;
-    final center = Offset(t.xNorm * w, t.yNorm * h);
-    final sz = _gizBoxSize(t, textScale, box);
-    final hw = sz.width / 2, hh = sz.height / 2;
-    final u = _unrotate(local - center, t.rotationDeg * math.pi / 180);
+    final center = g.center;
+    final hw = g.box.width / 2, hh = g.box.height / 2;
+    final u = _unrotate(local - center, g.rotDeg * math.pi / 180);
     _gizStartPointer = local;
-    _gizStartX = t.xNorm;
-    _gizStartY = t.yNorm;
-    _gizStartSize = t.sizePt;
-    _gizStartRot = t.rotationDeg;
+    _gizStartX = center.dx / w;
+    _gizStartY = center.dy / h;
+    _gizStartScale = _selectedScaleRef();
+    _gizStartRot = g.rotDeg;
     _gizStartDist = math.max((local - center).distance, 1);
     _gizStartAngle = math.atan2(local.dy - center.dy, local.dx - center.dx);
     _gizChanged = false;
@@ -677,19 +854,28 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   }
 
   void _gizPanUpdate(Offset local, BoxConstraints box) {
+    if (_gizMode == 0) return;
     final t = _ctrl.selectedText;
-    if (t == null || _gizMode == 0) return;
+    final o = t == null ? _ctrl.selectedOverlay : null;
+    if (t == null && o == null) return;
     final w = box.maxWidth, h = box.maxHeight;
     final startCenter = Offset(_gizStartX * w, _gizStartY * h);
     _gizChanged = true;
     if (_gizMode == 1) {
       final nx = (_gizStartX + (local.dx - _gizStartPointer.dx) / w).clamp(0.02, 0.98);
       final ny = (_gizStartY + (local.dy - _gizStartPointer.dy) / h).clamp(0.02, 0.98);
-      _ctrl.updateText(t.copyWith(xNorm: nx, yNorm: ny), record: false);
+      if (t != null) {
+        _ctrl.updateText(t.copyWith(xNorm: nx, yNorm: ny), record: false);
+      } else {
+        _ctrl.updateOverlay(o!.copyWith(xNorm: nx, yNorm: ny), record: false);
+      }
     } else if (_gizMode == 2) {
       final factor = (local - startCenter).distance / _gizStartDist;
-      final nSize = (_gizStartSize * factor).clamp(12.0, 200.0);
-      _ctrl.updateText(t.copyWith(sizePt: nSize), record: false);
+      if (t != null) {
+        _ctrl.updateText(t.copyWith(sizePt: (_gizStartScale * factor).clamp(12.0, 200.0)), record: false);
+      } else {
+        _ctrl.updateOverlay(o!.copyWith(wNorm: (_gizStartScale * factor).clamp(0.05, 2.0)), record: false);
+      }
     } else if (_gizMode == 3) {
       final ang = math.atan2(local.dy - startCenter.dy, local.dx - startCenter.dx);
       var deg = _gizStartRot + (ang - _gizStartAngle) * 180 / math.pi;
@@ -699,7 +885,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
           break;
         }
       }
-      _ctrl.updateText(t.copyWith(rotationDeg: deg), record: false);
+      if (t != null) {
+        _ctrl.updateText(t.copyWith(rotationDeg: deg), record: false);
+      } else {
+        _ctrl.updateOverlay(o!.copyWith(rotationDeg: deg), record: false);
+      }
     }
   }
 
@@ -708,8 +898,14 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     _gizMode = 0;
     _gizChanged = false;
     if (!wasChanged) return;
-    final cur = _ctrl.selectedText;
-    if (cur != null) _ctrl.updateText(cur); // one undo entry for the whole gesture
+    // Commit one undo entry for the whole gesture.
+    final t = _ctrl.selectedText;
+    if (t != null) {
+      _ctrl.updateText(t);
+      return;
+    }
+    final o = _ctrl.selectedOverlay;
+    if (o != null) _ctrl.updateOverlay(o);
   }
 
   Widget _captionOverlay(EditorState state) {
@@ -822,9 +1018,11 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                 pxPerSecond: state.pxPerSecond,
                 selectedClipId: state.selectedClipId,
                 selectedTextId: state.selection.kind == SelectionKind.text ? state.selection.id : null,
+                selectedOverlayId: state.selection.kind == SelectionKind.overlay ? state.selection.id : null,
                 onSeek: _seekToOutput,
                 onSelectClip: _ctrl.selectClip,
                 onSelectText: _ctrl.selectText,
+                onSelectOverlay: _ctrl.selectOverlay,
               ),
             ),
             _addMusicRow(state),

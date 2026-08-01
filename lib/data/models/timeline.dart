@@ -1,4 +1,5 @@
 import 'edit_settings.dart';
+import 'overlay_object.dart';
 import 'transcript.dart';
 
 /// The editable timeline — the JSON document the AI pipeline produces and the
@@ -207,6 +208,7 @@ class Timeline {
     required this.captions,
     required this.effects,
     required this.audio,
+    this.overlays = const [],
     this.settings = const EditSettings(),
   });
 
@@ -215,6 +217,7 @@ class Timeline {
   final List<CaptionCue> captions;
   final List<EffectLayer> effects;
   final List<AudioLayer> audio;
+  final List<OverlayObject> overlays; // images/stickers composited over the base
   final EditSettings settings;
 
   factory Timeline.fromJson(Map<String, dynamic> j) => Timeline(
@@ -223,6 +226,7 @@ class Timeline {
         captions: _list(j['captions'], CaptionCue.fromJson),
         effects: _list(j['effects'], EffectLayer.fromJson),
         audio: _list(j['audio'], AudioLayer.fromJson),
+        overlays: _list(j['overlays'], OverlayObject.fromJson),
         settings: j['settings'] == null
             ? const EditSettings()
             : EditSettings.fromJson(Map<String, dynamic>.from(j['settings'] as Map)),
@@ -234,6 +238,7 @@ class Timeline {
         'captions': captions.map((e) => e.toJson()).toList(),
         'effects': effects.map((e) => e.toJson()).toList(),
         'audio': audio.map((e) => e.toJson()).toList(),
+        'overlays': overlays.map((e) => e.toJson()).toList(),
         'settings': settings.toJson(),
       };
 
@@ -245,6 +250,7 @@ class Timeline {
     List<CaptionCue>? captions,
     List<EffectLayer>? effects,
     List<AudioLayer>? audio,
+    List<OverlayObject>? overlays,
     EditSettings? settings,
   }) =>
       Timeline(
@@ -253,6 +259,7 @@ class Timeline {
         captions: captions ?? this.captions,
         effects: effects ?? this.effects,
         audio: audio ?? this.audio,
+        overlays: overlays ?? this.overlays,
         settings: settings ?? this.settings,
       );
 

@@ -22,9 +22,11 @@ class TimelineView extends StatefulWidget {
     required this.pxPerSecond,
     required this.selectedClipId,
     required this.selectedTextId,
+    required this.selectedOverlayId,
     required this.onSeek,
     required this.onSelectClip,
     required this.onSelectText,
+    required this.onSelectOverlay,
   });
 
   final Timeline timeline;
@@ -32,9 +34,11 @@ class TimelineView extends StatefulWidget {
   final double pxPerSecond;
   final String? selectedClipId;
   final String? selectedTextId;
+  final String? selectedOverlayId;
   final ValueChanged<int> onSeek;
   final ValueChanged<String> onSelectClip;
   final ValueChanged<String> onSelectText;
+  final ValueChanged<String> onSelectOverlay;
 
   @override
   State<TimelineView> createState() => _TimelineViewState();
@@ -69,6 +73,7 @@ class _TimelineViewState extends State<TimelineView> {
     final rows = <Widget>[
       _ruler(),
       ..._videoRows(),
+      if (_t.overlays.isNotEmpty) _overlayRow(),
       if (_t.effects.isNotEmpty) _effectsRow(),
       ..._audioRows(),
       if (_t.captions.isNotEmpty) _captionRow(),
@@ -285,6 +290,48 @@ class _TimelineViewState extends State<TimelineView> {
         ),
       ),
     );
+  }
+
+  /// Image/sticker overlays as real time-ranged blocks. Tapping selects — synced
+  /// with the canvas via the provider's selection.
+  Widget _overlayRow() {
+    final blocks = <Widget>[];
+    for (final o in _t.overlays) {
+      final end = o.endMs > o.startMs ? o.endMs : _outMs;
+      final left = _x(o.startMs);
+      final width = math.max(_x(end) - left, 24.0);
+      final selected = widget.selectedOverlayId == o.id;
+      final isSticker = o.kind.name == 'sticker';
+      blocks.add(Positioned(
+        left: left,
+        top: 1,
+        height: _capH - 2,
+        width: width,
+        child: GestureDetector(
+          onTap: () => widget.onSelectOverlay(o.id),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xFF34C759).withValues(alpha: 0.9), // green = overlay
+              borderRadius: BorderRadius.circular(5),
+              border: selected ? Border.all(color: Colors.white, width: 1.4) : null,
+            ),
+            alignment: Alignment.centerLeft,
+            child: Row(children: [
+              Icon(isSticker ? Icons.emoji_emotions_outlined : Icons.image_outlined, size: 11, color: Colors.white),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(isSticker ? 'Sticker' : 'Image',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
+              ),
+            ]),
+          ),
+        ),
+      ));
+    }
+    return _rowFrame(_capH, blocks);
   }
 
   /// Text overlays as real time-ranged blocks (positioned by [TextOverlay.startMs],

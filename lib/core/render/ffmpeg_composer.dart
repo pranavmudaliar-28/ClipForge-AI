@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import '../../data/models/canvas_preset.dart';
 import '../../data/models/edit_settings.dart';
+import '../../data/models/overlay_object.dart';
 import '../../data/models/timeline.dart';
 
 /// A fully-built render job: the ffmpeg command, expected output duration (for
@@ -107,10 +108,16 @@ abstract final class FfmpegComposer {
       vLab = 'vcut';
     }
 
+    final totalMs = _outMs(clips, s);
+
+    // 4b) Image/sticker overlays composited over the base video, in z-order.
+    //     Overlay image inputs are appended AFTER the sources but BEFORE the
+    //     music input (added in step 7), so the music index stays correct.
+    vLab = _buildOverlays(f, inputs, vLab, timeline.overlays, w, h, totalMs);
+
     // 5) Captions + text overlays + watermark → ONE ASS file burned via libass.
     //    (We avoid ffmpeg `drawtext`, which needs a font file on Android and
     //    trips on spaces in the text — libass handles fonts + spacing.)
-    final totalMs = _outMs(clips, s);
     final ass = _buildAss(w, h, timeline.captions, clips, s.texts, totalMs, watermark);
     if (ass != null) {
       await File(subtitlePath).writeAsString(ass);
@@ -220,6 +227,46 @@ abstract final class FfmpegComposer {
       perClip.add(idx);
     }
     return (sources, perClip);
+  }
+
+  /// Composites image/sticker [overlays] over the base [vLab] in z-order. Each
+  /// overlay adds a looped-still input (appended to [inputs]) and a subchain:
+  /// scale → rgba → optional rotate → optional alpha, then overlay=x:y with an
+  /// `enable='between(t,start,end)'` time gate. Returns the new video label.
+  static String _buildOverlays(
+      List<String> f, List<String> inputs, String vLab, List<OverlayObject> overlays, int w, int h, int totalMs) {
+    if (overlays.isEmpty) return vLab;
+    final totalSec = (totalMs / 1000).toStringAsFixed(3);
+    final sorted = [...overlays]..sort((a, b) => a.z.compareTo(b.z));
+    var base = vLab;
+    for (var k = 0; k < sorted.length; k++) {
+      final o = sorted[k];
+      if (o.sourcePath.isEmpty || !File(o.sourcePath).existsSync()) continue;
+      final ovIdx = inputs.length; // this overlay's -i index
+      inputs.add("-loop 1 -t $totalSec -i '${o.sourcePath}'");
+      final wpx = (o.wNorm * w).round().clamp(2, w * 4);
+      final sub = StringBuffer('[$ovIdx:v]scale=$wpx:-1,format=rgba');
+      if (o.rotationDeg != 0) {
+        // rotate filter is clockwise-positive, matching Flutter Transform.rotate;
+        // expand output (rotw/roth) so rotated corners aren't clipped.
+        final r = (o.rotationDeg * math.pi / 180).toStringAsFixed(5);
+        sub.write(',rotate=$r:ow=rotw($r):oh=roth($r):c=none');
+      }
+      if (o.opacity < 1) sub.write(',colorchannelmixer=aa=${o.opacity.toStringAsFixed(3)}');
+      sub.write('[ov$k]');
+      f.add(sub.toString());
+      final startMs = o.startMs.clamp(0, totalMs);
+      final endMs = o.effectiveEndMs(totalMs).clamp(startMs, totalMs);
+      final s = (startMs / 1000).toStringAsFixed(3);
+      final e = (endMs / 1000).toStringAsFixed(3);
+      final outLab = 'vov$k';
+      f.add("[$base][ov$k]overlay="
+          "x='main_w*${o.xNorm.toStringAsFixed(4)}-overlay_w/2':"
+          "y='main_h*${o.yNorm.toStringAsFixed(4)}-overlay_h/2':"
+          "enable='between(t,$s,$e)'[$outLab]");
+      base = outLab;
+    }
+    return base;
   }
 
   static int _outMs(List<Clip> clips, EditSettings s) {

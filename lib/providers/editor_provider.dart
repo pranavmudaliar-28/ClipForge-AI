@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/models/edit_settings.dart';
+import '../data/models/overlay_object.dart';
 import '../data/models/project.dart';
 import '../data/models/timeline.dart';
 import 'app_providers.dart';
@@ -10,7 +11,7 @@ import 'projects_provider.dart';
 /// What kind of timeline element is currently selected. Drives the contextual
 /// toolbar and the canvas selection gizmo. `clip` + `text` are wired end-to-end;
 /// the others are defined for the upcoming batches.
-enum SelectionKind { none, clip, text, caption, audioLayer }
+enum SelectionKind { none, clip, text, overlay, caption, audioLayer }
 
 /// A single, typed selection shared across the canvas and the timeline so that
 /// selecting an element in one highlights it in the other. Kept OUT of the undo
@@ -129,6 +130,8 @@ class EditorController extends StateNotifier<EditorState> {
         return t.clips.any((c) => c.id == sel.id) ? sel : Selection.none;
       case SelectionKind.text:
         return t.settings.texts.any((x) => x.id == sel.id) ? sel : Selection.none;
+      case SelectionKind.overlay:
+        return t.overlays.any((o) => o.id == sel.id) ? sel : Selection.none;
       case SelectionKind.none:
       case SelectionKind.caption:
       case SelectionKind.audioLayer:
@@ -162,6 +165,7 @@ class EditorController extends StateNotifier<EditorState> {
   void selectClip(String? id) => state = state.copyWith(
       selection: id == null ? Selection.none : Selection(SelectionKind.clip, id));
   void selectText(String id) => state = state.copyWith(selection: Selection(SelectionKind.text, id));
+  void selectOverlay(String id) => state = state.copyWith(selection: Selection(SelectionKind.overlay, id));
   void selectItem(SelectionKind kind, String id) =>
       state = state.copyWith(selection: Selection(kind, id));
   void clearSelection() => state = state.copyWith(selection: Selection.none);
@@ -196,6 +200,16 @@ class EditorController extends StateNotifier<EditorState> {
     final id = state.selection.id;
     for (final t in settings.texts) {
       if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  /// The selected image/sticker overlay, or null when it's something else.
+  OverlayObject? get selectedOverlay {
+    if (state.selection.kind != SelectionKind.overlay) return null;
+    final id = state.selection.id;
+    for (final o in state.timeline.overlays) {
+      if (o.id == id) return o;
     }
     return null;
   }
@@ -414,6 +428,69 @@ class EditorController extends StateNotifier<EditorState> {
     );
     _applySettings(settings.copyWith(texts: [...settings.texts, dup]));
     selectText(dup.id);
+  }
+
+  // --- overlays (Batch 3: image / sticker composited over the base video) ----
+  int _nextOverlayZ() =>
+      state.timeline.overlays.fold<int>(0, (m, o) => o.z >= m ? o.z + 1 : m);
+
+  /// Adds an overlay timed from the playhead for ~4s (open-ended near the end),
+  /// stacked on top, and selects it.
+  void addOverlay(OverlayObject o) {
+    final total = state.outputMs;
+    final start = state.positionMs.clamp(0, total);
+    final end = (start + 4000) <= total ? start + 4000 : 0; // 0 ⇒ open-ended
+    final placed = o.copyWith(startMs: start, endMs: end, z: _nextOverlayZ());
+    _commit(
+      state.timeline.copyWith(overlays: [...state.timeline.overlays, placed]),
+      select: Selection(SelectionKind.overlay, placed.id),
+    );
+  }
+
+  void updateOverlay(OverlayObject o, {bool record = true}) {
+    final next = state.timeline
+        .copyWith(overlays: state.timeline.overlays.map((x) => x.id == o.id ? o : x).toList());
+    if (record) {
+      _commit(next);
+    } else {
+      state = state.copyWith(timeline: next);
+    }
+  }
+
+  void removeOverlay(String id) {
+    _commit(state.timeline.copyWith(overlays: state.timeline.overlays.where((x) => x.id != id).toList()));
+    if (state.selection.kind == SelectionKind.overlay && state.selection.id == id) {
+      clearSelection();
+    }
+  }
+
+  void duplicateOverlay(String id) {
+    OverlayObject? src;
+    for (final o in state.timeline.overlays) {
+      if (o.id == id) {
+        src = o;
+        break;
+      }
+    }
+    if (src == null) return;
+    final dup = OverlayObject(
+      id: 'ov_${DateTime.now().microsecondsSinceEpoch}',
+      kind: src.kind,
+      sourcePath: src.sourcePath,
+      aspect: src.aspect,
+      startMs: src.startMs,
+      endMs: src.endMs,
+      xNorm: (src.xNorm + 0.03).clamp(0.02, 0.98),
+      yNorm: (src.yNorm + 0.03).clamp(0.02, 0.98),
+      wNorm: src.wNorm,
+      rotationDeg: src.rotationDeg,
+      opacity: src.opacity,
+      z: _nextOverlayZ(),
+    );
+    _commit(
+      state.timeline.copyWith(overlays: [...state.timeline.overlays, dup]),
+      select: Selection(SelectionKind.overlay, dup.id),
+    );
   }
 
   /// Real silence removal: run ffmpeg `silencedetect`, invert the silent spans,

@@ -246,6 +246,113 @@ Future<void> showClipTransformSheet(BuildContext context, EditorController ctrl)
   );
 }
 
+// ── Sticker picker (emoji, rasterized to PNG by the caller) ─────────────────
+/// Returns the chosen emoji string, or null if dismissed.
+Future<String?> showStickerPicker(BuildContext context) {
+  const emojis = [
+    '😀', '😂', '😍', '😎', '🥳', '😭', '🔥', '✨', '💯', '👍', '👀', '🎉',
+    '❤️', '⭐', '⚡', '💥', '🌈', '🎬', '📸', '🎵', '💬', '✅', '❌', '❓',
+    '💡', '🚀', '🏆', '👑', '🌟', '😱', '🤔', '🙌',
+  ];
+  return edShowPanel<String>(
+    context,
+    EdPanel(
+      title: 'Sticker',
+      child: SizedBox(
+        height: 300,
+        child: GridView.builder(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 6, mainAxisSpacing: 8, crossAxisSpacing: 8),
+          itemCount: emojis.length,
+          itemBuilder: (_, i) => GestureDetector(
+            onTap: () {
+              HapticFeedback.selectionClick();
+              Navigator.pop(context, emojis[i]);
+            },
+            child: Container(
+              decoration: BoxDecoration(color: Ed.barAlt, borderRadius: BorderRadius.circular(10)),
+              alignment: Alignment.center,
+              child: Text(emojis[i], style: const TextStyle(fontSize: 26)),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// ── Overlay (image/sticker) edit: opacity + timing ──────────────────────────
+Future<void> showOverlaySheet(BuildContext context, EditorController ctrl) {
+  final o0 = ctrl.selectedOverlay;
+  if (o0 == null) {
+    return edShowPanel(
+      context,
+      const EdPanel(
+        title: 'Overlay',
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          child: Text('Select an overlay.', style: TextStyle(color: Ed.muted)),
+        ),
+      ),
+    );
+  }
+  final int totalMs = ctrl.outputMs;
+  double opacity = o0.opacity;
+  double startS = o0.startMs / 1000.0;
+  double durS = (o0.effectiveEndMs(totalMs) - o0.startMs) / 1000.0;
+  return edShowPanel(
+    context,
+    EdPanel(
+      title: 'Overlay',
+      onConfirm: () {
+        final o = ctrl.selectedOverlay;
+        if (o == null) return;
+        final start = (startS * 1000).round();
+        final durMs = (durS * 1000).round();
+        final dur = durMs < 200 ? 200 : durMs;
+        ctrl.updateOverlay(o.copyWith(opacity: opacity, startMs: start, endMs: start + dur));
+      },
+      child: StatefulBuilder(builder: (context, setLocal) {
+        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          EdSliderRow(
+            label: 'Opacity',
+            value: opacity,
+            min: 0,
+            max: 1,
+            valueFmt: (v) => '${(v * 100).round()}%',
+            onChanged: (v) => setLocal(() {
+              opacity = v;
+              final o = ctrl.selectedOverlay;
+              if (o != null) ctrl.updateOverlay(o.copyWith(opacity: v), record: false);
+            }),
+            onChangeEnd: (_) {},
+          ),
+          const SizedBox(height: 12),
+          const Text('Timing', style: TextStyle(color: Ed.muted, fontSize: 12)),
+          EdSliderRow(
+            label: 'Start',
+            value: startS.clamp(0.0, totalMs / 1000.0),
+            min: 0,
+            max: (totalMs / 1000.0).clamp(0.5, 100000),
+            valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+            onChanged: (v) => setLocal(() => startS = v),
+            onChangeEnd: (_) {},
+          ),
+          EdSliderRow(
+            label: 'Duration',
+            value: durS.clamp(0.2, 100000),
+            min: 0.2,
+            max: (totalMs / 1000.0).clamp(0.2, 100000),
+            valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+            onChanged: (v) => setLocal(() => durS = v),
+            onChangeEnd: (_) {},
+          ),
+        ]);
+      }),
+    ),
+  );
+}
+
 // ── Filter presets ────────────────────────────────────────────────────────────
 Future<void> showFilterSheet(BuildContext context, EditorController ctrl) {
   const order = FilterPreset.values;

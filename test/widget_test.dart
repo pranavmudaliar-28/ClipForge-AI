@@ -4,6 +4,7 @@ import 'package:clipforge_ai/core/render/ffmpeg_composer.dart';
 import 'package:clipforge_ai/core/utils/formatters.dart';
 import 'package:clipforge_ai/data/models/canvas_preset.dart';
 import 'package:clipforge_ai/data/models/edit_settings.dart';
+import 'package:clipforge_ai/data/models/overlay_object.dart';
 import 'package:clipforge_ai/data/models/timeline.dart';
 import 'package:clipforge_ai/data/models/transcript.dart';
 import 'package:clipforge_ai/providers/editor_provider.dart';
@@ -172,6 +173,84 @@ void main() {
       expect(job.command.contains('fade=t=in'), true); // video fade
       expect(job.command.contains('afade=t=out'), true); // audio fade
       await dir.delete(recursive: true);
+    });
+
+    test('composites an overlay with time gate, rotation, and opacity', () async {
+      final dir = await Directory.systemTemp.createTemp('cf_ov_test');
+      final imgPath = '${dir.path}/logo.png';
+      await File(imgPath).writeAsBytes([0, 1, 2, 3]); // existence is enough to build the command
+      final timeline = Timeline(
+        durationMs: 6000,
+        clips: const [Clip(id: 'c0', startMs: 0, endMs: 6000)],
+        captions: const [],
+        effects: const [],
+        audio: const [],
+        overlays: [
+          OverlayObject(
+            id: 'o0',
+            kind: OverlayKind.image,
+            sourcePath: imgPath,
+            aspect: 1.5,
+            startMs: 1000,
+            endMs: 4000,
+            wNorm: 0.4,
+            rotationDeg: 15,
+            opacity: 0.6,
+          ),
+        ],
+      );
+      final job = await FfmpegComposer.build(
+        sourcePath: '/tmp/in.mp4',
+        timeline: timeline,
+        canvas: CanvasPreset.all.first,
+        exportW: 1080,
+        exportH: 1920,
+        outputPath: '${dir.path}/out.mp4',
+        subtitlePath: '${dir.path}/s.ass',
+        watermark: false,
+      );
+      expect(job.command.contains('-loop 1 -t'), true); // looped still input
+      expect(job.command.contains("enable='between(t,1.000,4.000)'"), true); // time gate
+      expect(job.command.contains('colorchannelmixer=aa=0.600'), true); // opacity
+      expect(job.command.contains('rotate='), true); // rotation
+      await dir.delete(recursive: true);
+    });
+  });
+
+  group('OverlayObject', () {
+    test('round-trips through JSON', () {
+      const o = OverlayObject(
+        id: 'o',
+        kind: OverlayKind.sticker,
+        sourcePath: '/x/y.png',
+        aspect: 1.5,
+        startMs: 1000,
+        endMs: 4000,
+        xNorm: 0.3,
+        yNorm: 0.6,
+        wNorm: 0.25,
+        rotationDeg: 20,
+        opacity: 0.5,
+        z: 2,
+      );
+      final r = OverlayObject.fromJson(o.toJson());
+      expect(r.kind, OverlayKind.sticker);
+      expect(r.sourcePath, '/x/y.png');
+      expect(r.aspect, 1.5);
+      expect(r.startMs, 1000);
+      expect(r.endMs, 4000);
+      expect(r.wNorm, 0.25);
+      expect(r.rotationDeg, 20);
+      expect(r.opacity, 0.5);
+      expect(r.z, 2);
+    });
+
+    test('defaults for a minimal JSON + effectiveEndMs', () {
+      final r = OverlayObject.fromJson(const {'id': 'o', 'sourcePath': '/a.png'});
+      expect(r.kind, OverlayKind.image);
+      expect(r.opacity, 1);
+      expect(r.wNorm, 0.4);
+      expect(r.effectiveEndMs(5000), 5000); // open-ended ⇒ full duration
     });
   });
 
