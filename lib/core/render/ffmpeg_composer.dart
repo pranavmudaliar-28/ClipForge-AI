@@ -330,13 +330,22 @@ abstract final class FfmpegComposer {
       cursor += clip.playbackMs;
     }
 
-    // Positioned text overlays (full duration).
+    // Positioned text overlays, each burned only within its own output-timeline
+    // window (timing is already on the output axis, so — unlike captions — no
+    // clip remap is needed, just a clamp). Rotation + opacity map to libass tags.
     for (final t in texts) {
+      final startMs = t.startMs.clamp(0, totalMs);
+      final endMs = t.effectiveEndMs(totalMs).clamp(startMs, totalMs);
+      if (endMs <= startMs) continue; // nothing to burn
       final x = (t.xNorm * w).round();
       final y = (t.yNorm * h).round();
-      final c = _assColor(t.colorHex);
-      final ov = '{\\an5\\pos($x,$y)\\fs${t.sizePt.round()}\\c$c}${_assEsc(t.text)}';
-      b.writeln('Dialogue: 0,${_assTs(0)},${_assTs(totalMs)},Txt,,0,0,0,,$ov');
+      final tags = StringBuffer('{\\an5\\pos($x,$y)\\fs${t.sizePt.round()}\\c${_assColor(t.colorHex)}');
+      // libass \frz is counter-clockwise-positive while Flutter Transform.rotate
+      // (canvas preview) is clockwise-positive — negate so export matches preview.
+      if (t.rotationDeg != 0) tags.write('\\frz${(-t.rotationDeg).toStringAsFixed(2)}');
+      if (t.opacity < 1) tags.write('\\alpha${_assAlpha(t.opacity)}');
+      tags.write('}');
+      b.writeln('Dialogue: 0,${_assTs(startMs)},${_assTs(endMs)},Txt,,0,0,0,,$tags${_assEsc(t.text)}');
     }
     return b.toString();
   }
@@ -351,6 +360,13 @@ abstract final class FfmpegComposer {
   }
 
   static String _assEsc(String s) => s.replaceAll('\n', '\\N').replaceAll('{', '(').replaceAll('}', ')');
+
+  /// opacity 1..0 -> ASS alpha override &HAA& (00 = opaque, FF = fully transparent).
+  static String _assAlpha(double opacity) {
+    final o = opacity < 0 ? 0.0 : (opacity > 1 ? 1.0 : opacity);
+    final a = ((1.0 - o) * 255).round();
+    return '&H${a.toRadixString(16).padLeft(2, '0').toUpperCase()}&';
+  }
 
   /// #RRGGBB -> ASS &H00BBGGRR
   static String _assColor(String hex) {

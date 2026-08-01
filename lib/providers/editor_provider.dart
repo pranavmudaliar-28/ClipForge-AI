@@ -7,6 +7,30 @@ import '../data/models/timeline.dart';
 import 'app_providers.dart';
 import 'projects_provider.dart';
 
+/// What kind of timeline element is currently selected. Drives the contextual
+/// toolbar and the canvas selection gizmo. `clip` + `text` are wired end-to-end;
+/// the others are defined for the upcoming batches.
+enum SelectionKind { none, clip, text, caption, audioLayer }
+
+/// A single, typed selection shared across the canvas and the timeline so that
+/// selecting an element in one highlights it in the other. Kept OUT of the undo
+/// snapshot (selection is transient, exactly like [EditorState.selectedClipId]
+/// was before).
+@immutable
+class Selection {
+  const Selection(this.kind, this.id);
+  final SelectionKind kind;
+  final String? id; // null only when kind == none
+
+  static const none = Selection(SelectionKind.none, null);
+  bool get isNone => kind == SelectionKind.none;
+
+  @override
+  bool operator ==(Object other) => other is Selection && other.kind == kind && other.id == id;
+  @override
+  int get hashCode => Object.hash(kind, id);
+}
+
 @immutable
 class EditorState {
   const EditorState({
@@ -15,7 +39,7 @@ class EditorState {
     required this.timeline,
     required this.canvasId,
     required this.durationMs,
-    this.selectedClipId,
+    this.selection = Selection.none,
     this.positionMs = 0,
     this.pxPerSecond = 80,
     this.past = const [],
@@ -27,7 +51,7 @@ class EditorState {
   final Timeline timeline;
   final String canvasId;
   final int durationMs; // source duration
-  final String? selectedClipId;
+  final Selection selection;
   final int positionMs; // playhead on the OUTPUT timeline
   final double pxPerSecond;
   final List<Timeline> past;
@@ -37,11 +61,14 @@ class EditorState {
   bool get canRedo => future.isNotEmpty;
   int get outputMs => timeline.playbackDurationMs;
 
+  /// Back-compat shim so existing clip-selection read sites keep working.
+  String? get selectedClipId => selection.kind == SelectionKind.clip ? selection.id : null;
+
   EditorState copyWith({
     String? title,
     Timeline? timeline,
     String? canvasId,
-    Object? selectedClipId = _sentinel,
+    Selection? selection,
     int? positionMs,
     double? pxPerSecond,
     List<Timeline>? past,
@@ -53,16 +80,13 @@ class EditorState {
       timeline: timeline ?? this.timeline,
       canvasId: canvasId ?? this.canvasId,
       durationMs: durationMs,
-      selectedClipId:
-          selectedClipId == _sentinel ? this.selectedClipId : selectedClipId as String?,
+      selection: selection ?? this.selection,
       positionMs: positionMs ?? this.positionMs,
       pxPerSecond: pxPerSecond ?? this.pxPerSecond,
       past: past ?? this.past,
       future: future ?? this.future,
     );
   }
-
-  static const _sentinel = Object();
 }
 
 class EditorController extends StateNotifier<EditorState> {
@@ -88,13 +112,28 @@ class EditorController extends StateNotifier<EditorState> {
   }
 
   // --- history --------------------------------------------------------------
-  void _commit(Timeline next, {String? select}) {
+  void _commit(Timeline next, {Selection? select}) {
     state = state.copyWith(
       past: [...state.past, state.timeline],
       future: const [],
       timeline: next,
-      selectedClipId: select ?? state.selectedClipId,
+      selection: select ?? state.selection,
     );
+  }
+
+  /// After undo/redo the timeline may no longer contain the selected element;
+  /// drop a dangling selection so the toolbar/gizmo never target a ghost.
+  Selection _reconcile(Selection sel, Timeline t) {
+    switch (sel.kind) {
+      case SelectionKind.clip:
+        return t.clips.any((c) => c.id == sel.id) ? sel : Selection.none;
+      case SelectionKind.text:
+        return t.settings.texts.any((x) => x.id == sel.id) ? sel : Selection.none;
+      case SelectionKind.none:
+      case SelectionKind.caption:
+      case SelectionKind.audioLayer:
+        return sel;
+    }
   }
 
   void undo() {
@@ -104,6 +143,7 @@ class EditorController extends StateNotifier<EditorState> {
       timeline: prev,
       past: state.past.sublist(0, state.past.length - 1),
       future: [state.timeline, ...state.future],
+      selection: _reconcile(state.selection, prev),
     );
   }
 
@@ -114,22 +154,48 @@ class EditorController extends StateNotifier<EditorState> {
       timeline: next,
       future: state.future.sublist(1),
       past: [...state.past, state.timeline],
+      selection: _reconcile(state.selection, next),
     );
   }
 
   // --- selection / playhead -------------------------------------------------
-  void select(String? clipId) => state = state.copyWith(selectedClipId: clipId);
+  void selectClip(String? id) => state = state.copyWith(
+      selection: id == null ? Selection.none : Selection(SelectionKind.clip, id));
+  void selectText(String id) => state = state.copyWith(selection: Selection(SelectionKind.text, id));
+  void selectItem(SelectionKind kind, String id) =>
+      state = state.copyWith(selection: Selection(kind, id));
+  void clearSelection() => state = state.copyWith(selection: Selection.none);
+
+  @Deprecated('Use selectClip')
+  void select(String? clipId) => selectClip(clipId);
+
   void seek(int ms) => state = state.copyWith(positionMs: ms.clamp(0, state.outputMs));
   void setZoom(double pxPerSecond) =>
       state = state.copyWith(pxPerSecond: pxPerSecond.clamp(20.0, 240.0));
   void rename(String title) => state = state.copyWith(title: title);
   void setCanvas(String canvasId) => state = state.copyWith(canvasId: canvasId);
 
-  Clip? get _selected {
-    final id = state.selectedClipId;
-    if (id == null) return null;
+  // Public read accessors for the tool sheets / gizmo.
+  int get positionMs => state.positionMs;
+  int get outputMs => state.outputMs;
+  int get sourceDurationMs => state.durationMs;
+
+  /// The selected video clip, or null when the selection is something else.
+  Clip? get selectedClip {
+    if (state.selection.kind != SelectionKind.clip) return null;
+    final id = state.selection.id;
     for (final c in state.timeline.clips) {
       if (c.id == id) return c;
+    }
+    return null;
+  }
+
+  /// The selected text overlay, or null when the selection is something else.
+  TextOverlay? get selectedText {
+    if (state.selection.kind != SelectionKind.text) return null;
+    final id = state.selection.id;
+    for (final t in settings.texts) {
+      if (t.id == id) return t;
     }
     return null;
   }
@@ -159,7 +225,7 @@ class EditorController extends StateNotifier<EditorState> {
         final next = [...clips]
           ..removeAt(i)
           ..insertAll(i, [left, right]);
-        _commit(state.timeline.copyWith(clips: next), select: right.id);
+        _commit(state.timeline.copyWith(clips: next), select: Selection(SelectionKind.clip, right.id));
         return;
       }
       outCursor += clipOut;
@@ -167,14 +233,14 @@ class EditorController extends StateNotifier<EditorState> {
   }
 
   void deleteSelected() {
-    final sel = _selected;
+    final sel = selectedClip;
     if (sel == null || state.timeline.clips.length <= 1) return;
     final next = state.timeline.clips.where((c) => c.id != sel.id).toList();
-    _commit(state.timeline.copyWith(clips: next), select: null);
+    _commit(state.timeline.copyWith(clips: next), select: Selection.none);
   }
 
   void duplicateSelected() {
-    final sel = _selected;
+    final sel = selectedClip;
     if (sel == null) return;
     final dup = Clip(
       id: 'clip_${DateTime.now().microsecondsSinceEpoch}',
@@ -201,7 +267,7 @@ class EditorController extends StateNotifier<EditorState> {
       cursor += pb;
     }
     final next = [...clips]..insert(insertAt, dup);
-    _commit(state.timeline.copyWith(clips: next), select: dup.id);
+    _commit(state.timeline.copyWith(clips: next), select: Selection(SelectionKind.clip, dup.id));
   }
 
   /// Appends a clip cut from [sourcePath] to the end of the video track. A
@@ -222,11 +288,11 @@ class EditorController extends StateNotifier<EditorState> {
       hasAudio: hasAudio,
     );
     final next = [...state.timeline.clips, newClip];
-    _commit(state.timeline.copyWith(clips: next), select: newClip.id);
+    _commit(state.timeline.copyWith(clips: next), select: Selection(SelectionKind.clip, newClip.id));
   }
 
   void setSpeed(double speed) {
-    final sel = _selected;
+    final sel = selectedClip;
     if (sel == null) return;
     final next = state.timeline.clips
         .map((c) => c.id == sel.id ? c.copyWith(speed: speed.clamp(0.25, 4.0)) : c)
@@ -234,12 +300,18 @@ class EditorController extends StateNotifier<EditorState> {
     _commit(state.timeline.copyWith(clips: next));
   }
 
-  /// Trim the selected clip's in/out (ms are source positions).
+  /// Trim the selected clip's in/out (ms are source positions). The upper bound
+  /// is the project source length for project-source clips; for added-source
+  /// clips we don't store the true source length yet (that's a later batch), so
+  /// we bound to the clip's current end — you can always trim inward, and
+  /// re-extend up to where it was (Undo restores the rest).
   void trimSelected({int? inMs, int? outMs}) {
-    final sel = _selected;
+    final sel = selectedClip;
     if (sel == null) return;
-    final ni = (inMs ?? sel.startMs).clamp(0, sel.endMs - 100);
-    final no = (outMs ?? sel.endMs).clamp(ni + 100, state.durationMs);
+    final srcBound = sel.sourcePath == null ? state.durationMs : sel.endMs;
+    final hi = srcBound < 100 ? 100 : srcBound;
+    final ni = (inMs ?? sel.startMs).clamp(0, hi - 100);
+    final no = (outMs ?? sel.endMs).clamp(ni + 100, hi);
     final next = state.timeline.clips
         .map((c) => c.id == sel.id ? c.copyWith(startMs: ni, endMs: no) : c)
         .toList();
@@ -268,11 +340,54 @@ class EditorController extends StateNotifier<EditorState> {
   void setTransition(TransitionType t, {int? ms}) =>
       _applySettings(settings.copyWith(transition: t, transitionMs: ms ?? settings.transitionMs));
   void setCutout(Cutout c, {bool record = true}) => _applySettings(settings.copyWith(cutout: c), record: record);
-  void addText(TextOverlay t) => _applySettings(settings.copyWith(texts: [...settings.texts, t]));
+  /// Adds a text overlay timed from the current playhead for ~3s (or open-ended
+  /// when the playhead is near the end), and selects it so the canvas gizmo and
+  /// contextual toolbar target it immediately.
+  void addText(TextOverlay t) {
+    final total = state.outputMs;
+    final start = state.positionMs.clamp(0, total);
+    final end = (start + 3000) <= total ? start + 3000 : 0; // 0 ⇒ open-ended
+    final placed = t.copyWith(startMs: start, endMs: end);
+    _applySettings(settings.copyWith(texts: [...settings.texts, placed]));
+    selectText(placed.id);
+  }
+
   void updateText(TextOverlay t, {bool record = true}) =>
       _applySettings(settings.copyWith(texts: settings.texts.map((x) => x.id == t.id ? t : x).toList()), record: record);
-  void removeText(String id) =>
-      _applySettings(settings.copyWith(texts: settings.texts.where((x) => x.id != id).toList()));
+
+  void removeText(String id) {
+    _applySettings(settings.copyWith(texts: settings.texts.where((x) => x.id != id).toList()));
+    if (state.selection.kind == SelectionKind.text && state.selection.id == id) {
+      clearSelection();
+    }
+  }
+
+  /// Duplicates a text overlay (new id, nudged position, same timing/transform)
+  /// and selects the copy.
+  void duplicateText(String id) {
+    TextOverlay? src;
+    for (final t in settings.texts) {
+      if (t.id == id) {
+        src = t;
+        break;
+      }
+    }
+    if (src == null) return;
+    final dup = TextOverlay(
+      id: 't_${DateTime.now().microsecondsSinceEpoch}',
+      text: src.text,
+      xNorm: (src.xNorm + 0.03).clamp(0.02, 0.98),
+      yNorm: (src.yNorm + 0.03).clamp(0.02, 0.98),
+      sizePt: src.sizePt,
+      colorHex: src.colorHex,
+      startMs: src.startMs,
+      endMs: src.endMs,
+      rotationDeg: src.rotationDeg,
+      opacity: src.opacity,
+    );
+    _applySettings(settings.copyWith(texts: [...settings.texts, dup]));
+    selectText(dup.id);
+  }
 
   /// Real silence removal: run ffmpeg `silencedetect`, invert the silent spans,
   /// and rebuild the clip list to keep only the spoken parts. Returns the number
@@ -315,7 +430,7 @@ class EditorController extends StateNotifier<EditorState> {
       for (var i = 0; i < kept.length; i++)
         Clip(id: 'clip_sil_$i', startMs: kept[i][0], endMs: kept[i][1], label: 'Scene ${i + 1}'),
     ];
-    _commit(state.timeline.copyWith(clips: clips), select: null);
+    _commit(state.timeline.copyWith(clips: clips), select: Selection.none);
     return silences.length;
   }
 

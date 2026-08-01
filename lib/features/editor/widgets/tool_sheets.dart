@@ -81,6 +81,67 @@ Future<void> showSpeedSheet(BuildContext context, double current, ValueChanged<d
   );
 }
 
+// ── Trim (clip in/out) ────────────────────────────────────────────────────────
+/// Trims the selected clip's start/end. Bounds come from the provider
+/// (project-source length for project clips; the clip's current end for
+/// added-source clips — the honest known bound this batch).
+Future<void> showTrimSheet(BuildContext context, EditorController ctrl) {
+  final clip = ctrl.selectedClip;
+  if (clip == null) {
+    return edShowPanel(
+      context,
+      const EdPanel(
+        title: 'Trim',
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          child: Text('Select a clip to trim.', style: TextStyle(color: Ed.muted)),
+        ),
+      ),
+    );
+  }
+  final int srcBoundMs = clip.sourcePath == null ? ctrl.sourceDurationMs : clip.endMs;
+  final double maxS = (srcBoundMs / 1000.0).clamp(0.3, 100000);
+  double inS = (clip.startMs / 1000.0).clamp(0.0, maxS);
+  double outS = (clip.endMs / 1000.0).clamp(0.0, maxS);
+  return edShowPanel(
+    context,
+    EdPanel(
+      title: 'Trim',
+      child: StatefulBuilder(builder: (context, setLocal) {
+        void commit() => ctrl.trimSelected(inMs: (inS * 1000).round(), outMs: (outS * 1000).round());
+        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Trim the clip’s start and end.', style: TextStyle(color: Ed.muted, fontSize: 12)),
+          const SizedBox(height: 8),
+          EdSliderRow(
+            label: 'Start',
+            value: inS.clamp(0.0, maxS),
+            min: 0,
+            max: maxS,
+            valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+            onChanged: (v) => setLocal(() {
+              inS = v;
+              if (inS > outS - 0.1) outS = (inS + 0.1).clamp(0.0, maxS);
+            }),
+            onChangeEnd: (_) => commit(),
+          ),
+          EdSliderRow(
+            label: 'End',
+            value: outS.clamp(0.0, maxS),
+            min: 0,
+            max: maxS,
+            valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+            onChanged: (v) => setLocal(() {
+              outS = v;
+              if (outS < inS + 0.1) inS = (outS - 0.1).clamp(0.0, maxS);
+            }),
+            onChangeEnd: (_) => commit(),
+          ),
+        ]);
+      }),
+    ),
+  );
+}
+
 // ── Filter presets ────────────────────────────────────────────────────────────
 Future<void> showFilterSheet(BuildContext context, EditorController ctrl) {
   const order = FilterPreset.values;
@@ -241,22 +302,39 @@ Future<void> showEffectsSheet(BuildContext context, EditorController ctrl) {
 /// Opens the text panel. Pass [editing] to edit an existing overlay in place
 /// (pre-fills the fields and calls [EditorController.updateText] on confirm);
 /// omit it to add a new overlay.
-Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOverlay? editing}) {
+Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOverlay? editing, bool focusTiming = false}) {
   final controller = TextEditingController(text: editing?.text ?? '');
   const colors = ['#FFFFFF', '#000000', '#08D0F2', '#7C5CFF', '#FFD60A', '#FF453A', '#30D158'];
   double size = editing?.sizePt ?? 34;
   double yNorm = editing?.yNorm ?? 0.5;
   String colorHex = editing?.colorHex ?? '#FFFFFF';
+  double opacity = editing?.opacity ?? 1.0;
+  // Timing (seconds on the output timeline). New text is placed by the provider
+  // at the playhead; existing text edits its real start + duration here.
+  final int totalMs = ctrl.outputMs;
+  double startS = (editing?.startMs ?? 0) / 1000.0;
+  double durS = editing == null ? 3.0 : (editing.effectiveEndMs(totalMs) - editing.startMs) / 1000.0;
   return edShowPanel(
     context,
     EdPanel(
-      title: editing == null ? 'Text' : 'Edit text',
+      title: editing == null ? 'Text' : (focusTiming ? 'Text timing' : 'Edit text'),
       onConfirm: () {
         final txt = controller.text.trim();
         if (txt.isEmpty) return;
         if (editing != null) {
-          // Preserve id + xNorm; update the edited fields.
-          ctrl.updateText(editing.copyWith(text: txt, yNorm: yNorm, sizePt: size, colorHex: colorHex));
+          final start = (startS * 1000).round();
+          final durMs = (durS * 1000).round();
+          final dur = durMs < 200 ? 200 : durMs;
+          // Preserve id + xNorm + rotation; update the edited fields.
+          ctrl.updateText(editing.copyWith(
+            text: txt,
+            yNorm: yNorm,
+            sizePt: size,
+            colorHex: colorHex,
+            opacity: opacity,
+            startMs: start,
+            endMs: start + dur,
+          ));
         } else {
           ctrl.addText(TextOverlay(
             id: 't_${DateTime.now().microsecondsSinceEpoch}',
@@ -264,6 +342,7 @@ Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOve
             yNorm: yNorm,
             sizePt: size,
             colorHex: colorHex,
+            opacity: opacity,
           ));
         }
       },
@@ -304,6 +383,14 @@ Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOve
               valueFmt: (v) => v.round().toString(),
               onChanged: (v) => setLocal(() => size = v),
               onChangeEnd: (_) {}),
+          EdSliderRow(
+              label: 'Opacity',
+              value: opacity,
+              min: 0,
+              max: 1,
+              valueFmt: (v) => '${(v * 100).round()}%',
+              onChanged: (v) => setLocal(() => opacity = v),
+              onChangeEnd: (_) {}),
           const SizedBox(height: 4),
           Wrap(
             spacing: 8,
@@ -314,6 +401,30 @@ Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOve
               ...colors.map((hex) => _ColorDot(hex: hex, selected: colorHex == hex, onTap: () => setLocal(() => colorHex = hex))),
             ],
           ),
+          // Timing is only meaningful for an existing overlay (a new one is
+          // placed at the playhead by the provider, then re-timed here).
+          if (editing != null) ...[
+            const SizedBox(height: 12),
+            const Align(alignment: Alignment.centerLeft, child: Text('Timing', style: TextStyle(color: Ed.muted, fontSize: 12))),
+            EdSliderRow(
+              label: 'Start',
+              value: startS.clamp(0.0, totalMs / 1000.0),
+              min: 0,
+              max: (totalMs / 1000.0).clamp(0.5, 100000),
+              valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+              onChanged: (v) => setLocal(() => startS = v),
+              onChangeEnd: (_) {},
+            ),
+            EdSliderRow(
+              label: 'Duration',
+              value: durS.clamp(0.2, 100000),
+              min: 0.2,
+              max: (totalMs / 1000.0).clamp(0.2, 100000),
+              valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+              onChanged: (v) => setLocal(() => durS = v),
+              onChangeEnd: (_) {},
+            ),
+          ],
           if (texts.isNotEmpty) ...[
             const SizedBox(height: 12),
             const Text('Added', style: TextStyle(color: Ed.muted, fontSize: 12)),

@@ -6,9 +6,9 @@ import '../../../core/utils/formatters.dart';
 import '../../../data/models/timeline.dart';
 import '../editor_theme.dart';
 
-/// Which kind of timeline item is currently highlighted (video clips are tracked
-/// via the provider's `selectedClipId`; these cover the read-through layers).
-enum _ItemKind { effect, audio, caption, text }
+/// Which kind of timeline item is currently highlighted (video clips + text are
+/// tracked via the provider's selection; these cover the read-through layers).
+enum _ItemKind { effect, audio, caption }
 
 /// Multi-track timeline (Twintra style): a shared time ruler above one row per
 /// video track index, then an effects row, one audio row per [AudioKind], and a
@@ -21,16 +21,20 @@ class TimelineView extends StatefulWidget {
     required this.positionMs,
     required this.pxPerSecond,
     required this.selectedClipId,
+    required this.selectedTextId,
     required this.onSeek,
     required this.onSelectClip,
+    required this.onSelectText,
   });
 
   final Timeline timeline;
   final int positionMs;
   final double pxPerSecond;
   final String? selectedClipId;
+  final String? selectedTextId;
   final ValueChanged<int> onSeek;
   final ValueChanged<String> onSelectClip;
+  final ValueChanged<String> onSelectText;
 
   @override
   State<TimelineView> createState() => _TimelineViewState();
@@ -283,22 +287,24 @@ class _TimelineViewState extends State<TimelineView> {
     );
   }
 
-  /// Text overlays have no time range (full-duration), so pack them as small
-  /// labeled chips left→right. Tap selects (edit happens via canvas tap).
+  /// Text overlays as real time-ranged blocks (positioned by [TextOverlay.startMs],
+  /// width by its window). Tapping selects — synced with the canvas via the
+  /// provider's selection. Open-ended text spans to the timeline end.
   Widget _textRow() {
-    final chips = <Widget>[];
-    var x = 0.0;
+    final blocks = <Widget>[];
     for (final t in _t.settings.texts) {
+      final end = t.endMs > t.startMs ? t.endMs : _outMs;
+      final left = _x(t.startMs);
+      final width = math.max(_x(end) - left, 24.0);
+      final selected = widget.selectedTextId == t.id;
       final label = t.text.trim().isEmpty ? 'Text' : t.text.trim();
-      final w = math.min(math.max(label.length * 6.5 + 26, 46), 160).toDouble();
-      final selected = _selKind == _ItemKind.text && _selId == t.id;
-      chips.add(Positioned(
-        left: x,
+      blocks.add(Positioned(
+        left: left,
         top: 1,
         height: _capH - 2,
-        width: w,
+        width: width,
         child: GestureDetector(
-          onTap: () => _selectItem(t.id, _ItemKind.text),
+          onTap: () => widget.onSelectText(t.id),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 5),
             decoration: BoxDecoration(
@@ -320,9 +326,8 @@ class _TimelineViewState extends State<TimelineView> {
           ),
         ),
       ));
-      x += w + 6;
     }
-    return _rowFrame(_capH, chips);
+    return _rowFrame(_capH, blocks);
   }
 
   Widget _layerBlock({

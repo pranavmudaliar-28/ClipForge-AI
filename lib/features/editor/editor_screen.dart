@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:file_picker/file_picker.dart';
@@ -12,6 +13,7 @@ import '../../core/router/app_routes.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/widgets/app_toast.dart';
 import '../../data/models/canvas_preset.dart';
+import '../../data/models/edit_settings.dart';
 import '../../data/models/timeline.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/editor_provider.dart';
@@ -40,10 +42,13 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   int _activeClipIndex = 0;
   String? _projectSourcePath; // the single source the preview controller plays
 
-  // On-canvas text drag/pinch state (captured at gesture start).
-  Offset _txtStartFocal = Offset.zero;
-  double _txtStartX = 0.5, _txtStartY = 0.5, _txtStartSize = 34;
-  bool _txtMoved = false;
+  // Canvas selection-gizmo gesture state (captured at pan start).
+  // _gizMode: 0 none · 1 move · 2 scale · 3 rotate.
+  int _gizMode = 0;
+  Offset _gizStartPointer = Offset.zero;
+  double _gizStartX = 0.5, _gizStartY = 0.5, _gizStartSize = 34, _gizStartRot = 0;
+  double _gizStartDist = 1, _gizStartAngle = 0;
+  bool _gizChanged = false;
 
   EditorController get _ctrl => ref.read(editorControllerProvider(widget.projectId).notifier);
 
@@ -278,38 +283,81 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
             _timecodeBar(state),
             _timelineBlock(state),
             const Divider(height: 1, thickness: 1, color: Ed.hair),
-            _Toolbar(tools: _tools(state)),
+            // Toolbar is contextual: its buttons change with what's selected.
+            // The ValueKey resets the horizontal scroll when the context switches.
+            _Toolbar(key: ValueKey(state.selection.kind), tools: _toolsFor(state.selection, state)),
           ]),
         ),
       ),
     );
   }
 
-  double _selectedSpeed(EditorState s) {
-    for (final c in s.timeline.clips) {
-      if (c.id == s.selectedClipId) return c.speed;
+  /// The bottom toolbar changes with the current selection (CapCut-style). Only
+  /// tools with a real action for that context are shown — no dead buttons.
+  List<(IconData, String, VoidCallback)> _toolsFor(Selection sel, EditorState state) {
+    switch (sel.kind) {
+      case SelectionKind.clip:
+        return _clipTools(state);
+      case SelectionKind.text:
+        return _textTools();
+      case SelectionKind.none:
+      case SelectionKind.caption:
+      case SelectionKind.audioLayer:
+        return _globalTools(state);
     }
-    return 1.0;
   }
 
-  List<(IconData, String, VoidCallback)> _tools(EditorState state) => [
+  // No selection → project-level tools (add media, text, audio, canvas, looks, AI).
+  List<(IconData, String, VoidCallback)> _globalTools(EditorState state) => [
+        (Icons.add_photo_alternate_outlined, 'Add', _addClip),
+        (Icons.text_fields_rounded, 'Text', () => showTextSheet(context, _ctrl)),
+        (Icons.volume_up_outlined, 'Audio', () => showAudioSheet(context, _ctrl)),
         (Icons.crop_free_rounded, 'Canvas', () => showCanvasSheet(context, state.canvasId, _ctrl.setCanvas)),
+        (Icons.auto_awesome_rounded, 'Filter', () => showFilterSheet(context, _ctrl)),
+        (Icons.tune_rounded, 'Adjust', () => showAdjustSheet(context, _ctrl)),
+        (Icons.blur_on_rounded, 'Effects', () => showEffectsSheet(context, _ctrl)),
+        (Icons.subtitles_outlined, 'Captions', () => showCaptionsSheet(context, _ctrl)),
+        (Icons.auto_fix_high_rounded, 'AI Tools', _openAiTools),
+      ];
+
+  // A video clip is selected → clip operations + timeline-wide looks.
+  List<(IconData, String, VoidCallback)> _clipTools(EditorState state) => [
         (Icons.content_cut_rounded, 'Split', () {
           _ctrl.splitAtPlayhead();
           HapticFeedback.mediumImpact();
         }),
-        (Icons.speed_rounded, 'Speed', () => showSpeedSheet(context, _selectedSpeed(state), _ctrl.setSpeed)),
+        (Icons.straighten_rounded, 'Trim', () => showTrimSheet(context, _ctrl)),
+        (Icons.speed_rounded, 'Speed', () => showSpeedSheet(context, _ctrl.selectedClip?.speed ?? 1.0, _ctrl.setSpeed)),
+        (Icons.copy_rounded, 'Duplicate', _ctrl.duplicateSelected),
+        (Icons.delete_outline_rounded, 'Delete', _ctrl.deleteSelected),
         (Icons.auto_awesome_rounded, 'Filter', () => showFilterSheet(context, _ctrl)),
         (Icons.tune_rounded, 'Adjust', () => showAdjustSheet(context, _ctrl)),
         (Icons.blur_on_rounded, 'Effects', () => showEffectsSheet(context, _ctrl)),
-        (Icons.text_fields_rounded, 'Text', () => showTextSheet(context, _ctrl)),
-        (Icons.subtitles_outlined, 'Captions', () => showCaptionsSheet(context, _ctrl)),
-        (Icons.volume_up_outlined, 'Volume', () => showAudioSheet(context, _ctrl)),
-        (Icons.swap_horiz_rounded, 'Transition', () => showTransitionSheet(context, _ctrl)),
         (Icons.blur_circular_outlined, 'Cutout', () => showCutoutSheet(context, _ctrl)),
-        (Icons.copy_rounded, 'Duplicate', _ctrl.duplicateSelected),
-        (Icons.delete_outline_rounded, 'Delete', _ctrl.deleteSelected),
-        (Icons.auto_fix_high_rounded, 'AI Tools', _openAiTools),
+        (Icons.swap_horiz_rounded, 'Transition', () => showTransitionSheet(context, _ctrl)),
+        (Icons.volume_up_outlined, 'Volume', () => showAudioSheet(context, _ctrl)),
+      ];
+
+  // A text overlay is selected → edit / timing / duplicate / delete.
+  // (Animation is intentionally omitted — there is no real animated-text export
+  // yet; it arrives in the Animation batch rather than as a dead button.)
+  List<(IconData, String, VoidCallback)> _textTools() => [
+        (Icons.edit_rounded, 'Edit', () {
+          final cur = _ctrl.selectedText;
+          if (cur != null) showTextSheet(context, _ctrl, editing: cur);
+        }),
+        (Icons.timer_outlined, 'Timing', () {
+          final cur = _ctrl.selectedText;
+          if (cur != null) showTextSheet(context, _ctrl, editing: cur, focusTiming: true);
+        }),
+        (Icons.copy_rounded, 'Duplicate', () {
+          final cur = _ctrl.selectedText;
+          if (cur != null) _ctrl.duplicateText(cur.id);
+        }),
+        (Icons.delete_outline_rounded, 'Delete', () {
+          final cur = _ctrl.selectedText;
+          if (cur != null) _ctrl.removeText(cur.id);
+        }),
       ];
 
   void _openAiTools() {
@@ -403,8 +451,26 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
       final textScale = (box.maxHeight.isFinite && box.maxHeight > 0 && canvas.exportH > 0)
           ? box.maxHeight / canvas.exportH
           : 0.2;
+      // The currently-selected text overlay (if any) drives the canvas gizmo.
+      TextOverlay? selText;
+      if (state.selection.kind == SelectionKind.text) {
+        for (final t in s.texts) {
+          if (t.id == state.selection.id) {
+            selText = t;
+            break;
+          }
+        }
+      }
+
       return GestureDetector(
-        onTap: _togglePlay,
+        onTap: () {
+          // Tapping empty canvas deselects; with nothing selected, play/pause.
+          if (!state.selection.isNone) {
+            _ctrl.clearSelection();
+          } else {
+            _togglePlay();
+          }
+        },
         child: Stack(fit: StackFit.expand, children: [
           Container(color: Colors.black),
           content,
@@ -435,53 +501,180 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                 ),
               ),
             ),
-          // Text overlays on top (tappable to edit, draggable to move/resize).
+          // Text overlays (rotation + opacity match export). Unselected text is
+          // time-gated to its window; the selected one always shows so it stays
+          // editable even when the playhead is outside its range. Tap selects.
           for (final t in s.texts)
-            Align(
-              alignment: Alignment(t.xNorm * 2 - 1, t.yNorm * 2 - 1),
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                // Tap to edit this text in place (pre-filled sheet).
-                onTap: () => showTextSheet(context, _ctrl, editing: t),
-                // Drag to move, pinch to resize — live during gesture, one undo
-                // step committed on release (mirrors the slider record:false/true
-                // pattern in editor_provider).
-                onScaleStart: (d) {
-                  _txtStartFocal = d.focalPoint;
-                  _txtStartX = t.xNorm;
-                  _txtStartY = t.yNorm;
-                  _txtStartSize = t.sizePt;
-                  _txtMoved = false;
-                },
-                onScaleUpdate: (d) {
-                  final dxN = (d.focalPoint.dx - _txtStartFocal.dx) / box.maxWidth;
-                  final dyN = (d.focalPoint.dy - _txtStartFocal.dy) / box.maxHeight;
-                  if (d.scale != 1.0 || dxN.abs() > 0.005 || dyN.abs() > 0.005) _txtMoved = true;
-                  final nx = (_txtStartX + dxN).clamp(0.02, 0.98);
-                  final ny = (_txtStartY + dyN).clamp(0.02, 0.98);
-                  final nSize = (_txtStartSize * d.scale).clamp(12.0, 160.0);
-                  _ctrl.updateText(t.copyWith(xNorm: nx, yNorm: ny, sizePt: nSize), record: false);
-                },
-                onScaleEnd: (_) {
-                  if (!_txtMoved) return;
-                  final cur = _ctrl.settings.texts.firstWhere((x) => x.id == t.id, orElse: () => t);
-                  _ctrl.updateText(cur);
-                },
-                child: Text(
-                  t.text,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Color(int.parse('FF${t.colorHex.substring(1)}', radix: 16)),
-                    fontSize: (t.sizePt * textScale).clamp(8, 200),
-                    fontWeight: FontWeight.w800,
-                    shadows: const [Shadow(blurRadius: 4, color: Colors.black)],
-                  ),
-                ),
-              ),
-            ),
+            if (_shouldShowText(t, state)) _textDisplay(t, textScale),
+          // Selection gizmo (canvas-spanning gesture layer + painted handles),
+          // active only while a text is selected.
+          if (selText != null) _gizmoLayer(selText, box, textScale, s.texts),
         ]),
       );
     });
+  }
+
+  // ── Canvas text display + selection gizmo ────────────────────────────────────
+  bool _shouldShowText(TextOverlay t, EditorState state) {
+    if (state.selection.kind == SelectionKind.text && state.selection.id == t.id) return true;
+    final end = t.effectiveEndMs(state.outputMs);
+    return state.positionMs >= t.startMs && state.positionMs < end;
+  }
+
+  Widget _textDisplay(TextOverlay t, double textScale) {
+    final fontSize = (t.sizePt * textScale).clamp(8.0, 200.0);
+    return Align(
+      alignment: Alignment(t.xNorm * 2 - 1, t.yNorm * 2 - 1),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _ctrl.selectText(t.id),
+        child: Opacity(
+          opacity: t.opacity.clamp(0.0, 1.0),
+          child: Transform.rotate(
+            angle: t.rotationDeg * math.pi / 180,
+            child: Text(
+              t.text,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Color(int.parse('FF${t.colorHex.substring(1)}', radix: 16)),
+                fontSize: fontSize,
+                fontWeight: FontWeight.w800,
+                shadows: const [Shadow(blurRadius: 4, color: Colors.black)],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Measured pixel size of an overlay's text at the current preview scale (used
+  /// to size the gizmo box and to hit-test taps).
+  Size _measureText(String text, double fontSize, double maxWidth) {
+    final tp = TextPainter(
+      text: TextSpan(text: text.isEmpty ? ' ' : text, style: TextStyle(fontSize: fontSize, fontWeight: FontWeight.w800)),
+      textAlign: TextAlign.center,
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: maxWidth);
+    return tp.size;
+  }
+
+  Size _gizBoxSize(TextOverlay t, double textScale, BoxConstraints box) {
+    final fontSize = (t.sizePt * textScale).clamp(8.0, 200.0);
+    final sz = _measureText(t.text, fontSize, box.maxWidth);
+    const pad = 10.0;
+    return Size((sz.width + pad * 2).clamp(24.0, box.maxWidth), (sz.height + pad * 2).clamp(20.0, box.maxHeight));
+  }
+
+  Widget _gizmoLayer(TextOverlay t, BoxConstraints box, double textScale, List<TextOverlay> texts) {
+    return Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapUp: (d) {
+          final hit = _hitText(d.localPosition, texts, box, textScale);
+          if (hit == null) {
+            _ctrl.clearSelection();
+          } else if (hit != t.id) {
+            _ctrl.selectText(hit);
+          }
+        },
+        onPanStart: (d) => _gizPanStart(t, d.localPosition, box, textScale),
+        onPanUpdate: (d) => _gizPanUpdate(d.localPosition, box),
+        onPanEnd: (_) => _gizPanEnd(),
+        child: CustomPaint(
+          painter: _GizmoPainter(
+            center: Offset(t.xNorm * box.maxWidth, t.yNorm * box.maxHeight),
+            boxSize: _gizBoxSize(t, textScale, box),
+            rotationDeg: t.rotationDeg,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Rotate a delta vector by -rot (into the object's un-rotated frame).
+  Offset _unrotate(Offset d, double rot) {
+    final ca = math.cos(rot), sa = math.sin(rot);
+    return Offset(d.dx * ca + d.dy * sa, -d.dx * sa + d.dy * ca);
+  }
+
+  /// The topmost text overlay whose (rotated) box contains [local], or null.
+  String? _hitText(Offset local, List<TextOverlay> texts, BoxConstraints box, double textScale) {
+    final w = box.maxWidth, h = box.maxHeight;
+    for (var i = texts.length - 1; i >= 0; i--) {
+      final t = texts[i];
+      final center = Offset(t.xNorm * w, t.yNorm * h);
+      final u = _unrotate(local - center, t.rotationDeg * math.pi / 180);
+      final sz = _gizBoxSize(t, textScale, box);
+      if (u.dx.abs() <= sz.width / 2 && u.dy.abs() <= sz.height / 2) return t.id;
+    }
+    return null;
+  }
+
+  void _gizPanStart(TextOverlay t, Offset local, BoxConstraints box, double textScale) {
+    final w = box.maxWidth, h = box.maxHeight;
+    final center = Offset(t.xNorm * w, t.yNorm * h);
+    final sz = _gizBoxSize(t, textScale, box);
+    final hw = sz.width / 2, hh = sz.height / 2;
+    final u = _unrotate(local - center, t.rotationDeg * math.pi / 180);
+    _gizStartPointer = local;
+    _gizStartX = t.xNorm;
+    _gizStartY = t.yNorm;
+    _gizStartSize = t.sizePt;
+    _gizStartRot = t.rotationDeg;
+    _gizStartDist = math.max((local - center).distance, 1);
+    _gizStartAngle = math.atan2(local.dy - center.dy, local.dx - center.dx);
+    _gizChanged = false;
+    const slop = 24.0;
+    // Rotation handle sits above top-centre (see _GizmoPainter).
+    if ((u - Offset(0, -(hh + _kRotGap))).distance < slop) {
+      _gizMode = 3;
+    } else if ((u - Offset(-hw, -hh)).distance < slop ||
+        (u - Offset(hw, -hh)).distance < slop ||
+        (u - Offset(-hw, hh)).distance < slop ||
+        (u - Offset(hw, hh)).distance < slop) {
+      _gizMode = 2;
+    } else if (u.dx.abs() <= hw && u.dy.abs() <= hh) {
+      _gizMode = 1;
+    } else {
+      _gizMode = 0;
+    }
+  }
+
+  void _gizPanUpdate(Offset local, BoxConstraints box) {
+    final t = _ctrl.selectedText;
+    if (t == null || _gizMode == 0) return;
+    final w = box.maxWidth, h = box.maxHeight;
+    final startCenter = Offset(_gizStartX * w, _gizStartY * h);
+    _gizChanged = true;
+    if (_gizMode == 1) {
+      final nx = (_gizStartX + (local.dx - _gizStartPointer.dx) / w).clamp(0.02, 0.98);
+      final ny = (_gizStartY + (local.dy - _gizStartPointer.dy) / h).clamp(0.02, 0.98);
+      _ctrl.updateText(t.copyWith(xNorm: nx, yNorm: ny), record: false);
+    } else if (_gizMode == 2) {
+      final factor = (local - startCenter).distance / _gizStartDist;
+      final nSize = (_gizStartSize * factor).clamp(12.0, 200.0);
+      _ctrl.updateText(t.copyWith(sizePt: nSize), record: false);
+    } else if (_gizMode == 3) {
+      final ang = math.atan2(local.dy - startCenter.dy, local.dx - startCenter.dx);
+      var deg = _gizStartRot + (ang - _gizStartAngle) * 180 / math.pi;
+      for (final snap in const [-360, -270, -180, -90, 0, 90, 180, 270, 360]) {
+        if ((deg - snap).abs() < 4) {
+          deg = snap.toDouble();
+          break;
+        }
+      }
+      _ctrl.updateText(t.copyWith(rotationDeg: deg), record: false);
+    }
+  }
+
+  void _gizPanEnd() {
+    final wasChanged = _gizChanged;
+    _gizMode = 0;
+    _gizChanged = false;
+    if (!wasChanged) return;
+    final cur = _ctrl.selectedText;
+    if (cur != null) _ctrl.updateText(cur); // one undo entry for the whole gesture
   }
 
   Widget _captionOverlay(EditorState state) {
@@ -593,8 +786,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                 positionMs: state.positionMs,
                 pxPerSecond: state.pxPerSecond,
                 selectedClipId: state.selectedClipId,
+                selectedTextId: state.selection.kind == SelectionKind.text ? state.selection.id : null,
                 onSeek: _seekToOutput,
-                onSelectClip: _ctrl.select,
+                onSelectClip: _ctrl.selectClip,
+                onSelectText: _ctrl.selectText,
               ),
             ),
             _addMusicRow(state),
@@ -681,7 +876,7 @@ class _TopBar extends StatelessWidget {
 }
 
 class _Toolbar extends StatelessWidget {
-  const _Toolbar({required this.tools});
+  const _Toolbar({super.key, required this.tools});
   final List<(IconData, String, VoidCallback)> tools;
 
   @override
@@ -723,4 +918,55 @@ class _ToolButton extends StatelessWidget {
       ]),
     );
   }
+}
+
+/// Gap (px) between the top edge of the selection box and the rotation handle.
+const double _kRotGap = 24;
+
+/// Draws the selection box + corner scale handles + rotation handle for the
+/// selected on-canvas element, rotated with it. Purely visual — hit-testing and
+/// gestures live on the canvas-spanning layer in _EditorScreenState.
+class _GizmoPainter extends CustomPainter {
+  _GizmoPainter({required this.center, required this.boxSize, required this.rotationDeg});
+  final Offset center;
+  final Size boxSize;
+  final double rotationDeg;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(rotationDeg * math.pi / 180);
+    final hw = boxSize.width / 2, hh = boxSize.height / 2;
+    final line = Paint()
+      ..color = Ed.accent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTRB(-hw, -hh, hw, hh), const Radius.circular(3)),
+      line,
+    );
+    // Rotation stub + handle above top-centre.
+    canvas.drawLine(Offset(0, -hh), Offset(0, -hh - _kRotGap), line);
+    final fill = Paint()..color = Colors.white;
+    final edge = Paint()
+      ..color = Ed.accent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    void dot(Offset o) {
+      canvas.drawCircle(o, 6, fill);
+      canvas.drawCircle(o, 6, edge);
+    }
+
+    dot(Offset(-hw, -hh));
+    dot(Offset(hw, -hh));
+    dot(Offset(-hw, hh));
+    dot(Offset(hw, hh));
+    dot(Offset(0, -hh - _kRotGap)); // rotation handle
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _GizmoPainter old) =>
+      old.center != center || old.boxSize != boxSize || old.rotationDeg != rotationDeg;
 }

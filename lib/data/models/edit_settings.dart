@@ -66,6 +66,10 @@ class TextOverlay {
     this.yNorm = 0.5,
     this.sizePt = 34,
     this.colorHex = '#FFFFFF',
+    this.startMs = 0,
+    this.endMs = 0, // <= startMs means "open-ended" → runs to the end of the video
+    this.rotationDeg = 0, // clockwise-positive, matches Flutter Transform.rotate
+    this.opacity = 1, // 0..1
   });
 
   final String id;
@@ -73,8 +77,24 @@ class TextOverlay {
   final double xNorm, yNorm; // 0..1 centre position
   final double sizePt;
   final String colorHex;
+  final int startMs, endMs; // OUTPUT-timeline ms window
+  final double rotationDeg;
+  final double opacity;
 
-  TextOverlay copyWith({String? text, double? xNorm, double? yNorm, double? sizePt, String? colorHex}) =>
+  /// The end time given the timeline's [totalMs]; open-ended text runs to the end.
+  int effectiveEndMs(int totalMs) => endMs > startMs ? endMs : totalMs;
+
+  TextOverlay copyWith({
+    String? text,
+    double? xNorm,
+    double? yNorm,
+    double? sizePt,
+    String? colorHex,
+    int? startMs,
+    int? endMs,
+    double? rotationDeg,
+    double? opacity,
+  }) =>
       TextOverlay(
         id: id,
         text: text ?? this.text,
@@ -82,6 +102,10 @@ class TextOverlay {
         yNorm: yNorm ?? this.yNorm,
         sizePt: sizePt ?? this.sizePt,
         colorHex: colorHex ?? this.colorHex,
+        startMs: startMs ?? this.startMs,
+        endMs: endMs ?? this.endMs,
+        rotationDeg: rotationDeg ?? this.rotationDeg,
+        opacity: opacity ?? this.opacity,
       );
 
   factory TextOverlay.fromJson(Map<String, dynamic> j) => TextOverlay(
@@ -91,9 +115,25 @@ class TextOverlay {
         yNorm: (j['yNorm'] as num?)?.toDouble() ?? 0.5,
         sizePt: (j['sizePt'] as num?)?.toDouble() ?? 34,
         colorHex: j['colorHex'] as String? ?? '#FFFFFF',
+        // Missing keys default to the pre-timing behaviour (full duration, no
+        // rotation, opaque) so projects saved before this batch load unchanged.
+        startMs: (j['startMs'] as num?)?.toInt() ?? 0,
+        endMs: (j['endMs'] as num?)?.toInt() ?? 0,
+        rotationDeg: (j['rotationDeg'] as num?)?.toDouble() ?? 0,
+        opacity: (j['opacity'] as num?)?.toDouble() ?? 1,
       );
-  Map<String, dynamic> toJson() =>
-      {'id': id, 'text': text, 'xNorm': xNorm, 'yNorm': yNorm, 'sizePt': sizePt, 'colorHex': colorHex};
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'text': text,
+        'xNorm': xNorm,
+        'yNorm': yNorm,
+        'sizePt': sizePt,
+        'colorHex': colorHex,
+        'startMs': startMs,
+        'endMs': endMs,
+        'rotationDeg': rotationDeg,
+        'opacity': opacity,
+      };
 }
 
 class AudioSettings {
