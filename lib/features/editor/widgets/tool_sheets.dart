@@ -284,15 +284,17 @@ Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOve
             ),
           ),
           const SizedBox(height: 12),
-          Row(children: [
-            const Text('Position', style: TextStyle(color: Ed.icon, fontSize: 13)),
-            const SizedBox(width: 12),
-            _pill('Top', yNorm < 0.34, () => setLocal(() => yNorm = 0.15)),
-            const SizedBox(width: 8),
-            _pill('Middle', yNorm >= 0.34 && yNorm <= 0.66, () => setLocal(() => yNorm = 0.5)),
-            const SizedBox(width: 8),
-            _pill('Bottom', yNorm > 0.66, () => setLocal(() => yNorm = 0.85)),
-          ]),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Text('Position', style: TextStyle(color: Ed.icon, fontSize: 13)),
+              _pill('Top', yNorm < 0.34, () => setLocal(() => yNorm = 0.15)),
+              _pill('Middle', yNorm >= 0.34 && yNorm <= 0.66, () => setLocal(() => yNorm = 0.5)),
+              _pill('Bottom', yNorm > 0.66, () => setLocal(() => yNorm = 0.85)),
+            ],
+          ),
           const SizedBox(height: 8),
           EdSliderRow(
               label: 'Size',
@@ -303,14 +305,15 @@ Future<void> showTextSheet(BuildContext context, EditorController ctrl, {TextOve
               onChanged: (v) => setLocal(() => size = v),
               onChangeEnd: (_) {}),
           const SizedBox(height: 4),
-          Row(children: [
-            const Text('Colour', style: TextStyle(color: Ed.icon, fontSize: 13)),
-            const SizedBox(width: 12),
-            ...colors.map((hex) => Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: _ColorDot(hex: hex, selected: colorHex == hex, onTap: () => setLocal(() => colorHex = hex)),
-                )),
-          ]),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Text('Colour', style: TextStyle(color: Ed.icon, fontSize: 13)),
+              ...colors.map((hex) => _ColorDot(hex: hex, selected: colorHex == hex, onTap: () => setLocal(() => colorHex = hex))),
+            ],
+          ),
           if (texts.isNotEmpty) ...[
             const SizedBox(height: 12),
             const Text('Added', style: TextStyle(color: Ed.muted, fontSize: 12)),
@@ -496,14 +499,15 @@ Future<void> showCutoutSheet(BuildContext context, EditorController ctrl) {
             const Spacer(),
           ]),
           const SizedBox(height: 12),
-          Row(children: [
-            const Text('Key colour', style: TextStyle(color: Ed.icon, fontSize: 13)),
-            const SizedBox(width: 12),
-            ...keys.map((hex) => Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: _ColorDot(hex: hex, selected: cut.keyColorHex == hex, onTap: () => update(cut.copyWith(keyColorHex: hex))),
-                )),
-          ]),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Text('Key colour', style: TextStyle(color: Ed.icon, fontSize: 13)),
+              ...keys.map((hex) => _ColorDot(hex: hex, selected: cut.keyColorHex == hex, onTap: () => update(cut.copyWith(keyColorHex: hex)))),
+            ],
+          ),
           const SizedBox(height: 8),
           EdSliderRow(
             label: 'Similarity',

@@ -34,6 +34,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   bool _failed = false;
   bool _seeking = false;
 
+  // Which clip (list order) is currently playing — drives gap-skipping during
+  // playback so non-contiguous clips (remove-silence / delete / reorder) play
+  // back correctly instead of running straight through the source.
+  int _activeClipIndex = 0;
+  String? _projectSourcePath; // the single source the preview controller plays
+
   // On-canvas text drag/pinch state (captured at gesture start).
   Offset _txtStartFocal = Offset.zero;
   double _txtStartX = 0.5, _txtStartY = 0.5, _txtStartSize = 34;
@@ -54,6 +60,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
       setState(() => _failed = true);
       return;
     }
+    _projectSourcePath = path;
     final v = VideoPlayerController.file(File(path));
     try {
       await v.initialize();
@@ -70,17 +77,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   }
 
   // --- playhead <-> source mapping -----------------------------------------
-  int _sourceToOutput(int srcMs, List<Clip> clips) {
-    var cursor = 0;
-    for (final c in clips) {
-      if (srcMs >= c.startMs && srcMs <= c.endMs) {
-        return cursor + ((srcMs - c.startMs) / c.speed).round();
-      }
-      cursor += c.playbackMs;
-    }
-    return cursor;
-  }
-
   int _outputToSource(int outMs, List<Clip> clips) {
     var cursor = 0;
     for (final c in clips) {
@@ -92,19 +88,79 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     return clips.isEmpty ? outMs : clips.last.endMs;
   }
 
+  /// Which clip (list order) an output-timeline position falls in.
+  int _clipIndexForOutput(int outMs, List<Clip> clips) {
+    var cursor = 0;
+    for (var i = 0; i < clips.length; i++) {
+      final pb = clips[i].playbackMs;
+      if (outMs >= cursor && outMs < cursor + pb) return i;
+      cursor += pb;
+    }
+    return clips.isEmpty ? 0 : clips.length - 1;
+  }
+
+  /// Output position derived from the *active* clip + the raw player position —
+  /// correct even when clips repeat a source range (duplicate) or are reordered
+  /// (unlike [_sourceToOutput], which matches the first source range).
+  int _outputForActive(int srcMs, List<Clip> clips) {
+    if (clips.isEmpty) return 0;
+    final i = _activeClipIndex.clamp(0, clips.length - 1);
+    var base = 0;
+    for (var k = 0; k < i; k++) {
+      base += clips[k].playbackMs;
+    }
+    final c = clips[i];
+    final within = ((srcMs - c.startMs) / c.speed).round().clamp(0, c.playbackMs);
+    return base + within;
+  }
+
+  /// The preview controller only plays the project source; added-source clips
+  /// can't be shown by it (export is still exact).
+  bool _isProjectSource(Clip c) => c.sourcePath == null || c.sourcePath == _projectSourcePath;
+
   void _onTick() {
     final v = _video;
     if (v == null || !v.value.isInitialized || _seeking) return;
-    if (v.value.isPlaying) {
-      final clips = ref.read(editorControllerProvider(widget.projectId)).timeline.clips;
-      _ctrl.seek(_sourceToOutput(v.value.position.inMilliseconds, clips));
+    if (!v.value.isPlaying) return;
+
+    final state = ref.read(editorControllerProvider(widget.projectId));
+    final clips = state.timeline.clips;
+    if (clips.isEmpty) return;
+    final i = _activeClipIndex.clamp(0, clips.length - 1);
+    final cur = clips[i];
+    final srcMs = v.value.position.inMilliseconds;
+
+    // Playback ran past the current kept clip's source window → jump to the next
+    // clip in list order (skipping any gap), or stop at the timeline end.
+    if (srcMs >= cur.endMs) {
+      if (i + 1 >= clips.length) {
+        v.pause();
+        _ctrl.seek(state.outputMs);
+        if (mounted) setState(() {});
+        return;
+      }
+      _activeClipIndex = i + 1;
+      final next = clips[_activeClipIndex];
+      if (_isProjectSource(next)) {
+        _seeking = true;
+        v.seekTo(Duration(milliseconds: next.startMs)).then((_) => _seeking = false);
+      } else {
+        // Can't preview added-source footage with the project-source player.
+        v.pause();
+        if (mounted) setState(() {});
+      }
+      _ctrl.seek(_outputForActive(next.startMs, clips));
+      return;
     }
+
+    _ctrl.seek(_outputForActive(srcMs, clips));
   }
 
   Future<void> _seekToOutput(int outMs) async {
     final v = _video;
     if (v == null) return;
     final clips = ref.read(editorControllerProvider(widget.projectId)).timeline.clips;
+    _activeClipIndex = _clipIndexForOutput(outMs, clips);
     _seeking = true;
     _ctrl.seek(outMs);
     await v.seekTo(Duration(milliseconds: _outputToSource(outMs, clips)));
@@ -115,7 +171,14 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
     final v = _video;
     if (v == null) return;
     HapticFeedback.selectionClick();
-    v.value.isPlaying ? v.pause() : v.play();
+    if (v.value.isPlaying) {
+      v.pause();
+    } else {
+      // Resume from whichever clip the playhead is currently on.
+      final st = ref.read(editorControllerProvider(widget.projectId));
+      _activeClipIndex = _clipIndexForOutput(st.positionMs, st.timeline.clips);
+      v.play();
+    }
     setState(() {});
   }
 
@@ -337,7 +400,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         content = const Center(child: CircularProgressIndicator(color: Ed.accent));
       }
 
-      final textScale = box.maxHeight / (canvas.exportH == 0 ? 1920 : canvas.exportH);
+      final textScale = (box.maxHeight.isFinite && box.maxHeight > 0 && canvas.exportH > 0)
+          ? box.maxHeight / canvas.exportH
+          : 0.2;
       return GestureDetector(
         onTap: _togglePlay,
         child: Stack(fit: StackFit.expand, children: [
@@ -355,6 +420,22 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                 ),
               ),
             ),
+          if (_video != null) _captionOverlay(state),
+          // Play indicator is drawn BELOW the text overlays so a centered text
+          // isn't hidden behind it while paused; IgnorePointer so taps fall
+          // through to play/text handlers.
+          if (_video != null && !_video!.value.isPlaying)
+            IgnorePointer(
+              child: Center(
+                child: Container(
+                  width: 54,
+                  height: 54,
+                  decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.4), shape: BoxShape.circle),
+                  child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 32),
+                ),
+              ),
+            ),
+          // Text overlays on top (tappable to edit, draggable to move/resize).
           for (final t in s.texts)
             Align(
               alignment: Alignment(t.xNorm * 2 - 1, t.yNorm * 2 - 1),
@@ -396,16 +477,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
                     shadows: const [Shadow(blurRadius: 4, color: Colors.black)],
                   ),
                 ),
-              ),
-            ),
-          if (_video != null) _captionOverlay(state),
-          if (_video != null && !_video!.value.isPlaying)
-            Center(
-              child: Container(
-                width: 54,
-                height: 54,
-                decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.4), shape: BoxShape.circle),
-                child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 32),
               ),
             ),
         ]),

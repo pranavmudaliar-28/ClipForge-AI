@@ -176,7 +176,6 @@ class EditorController extends StateNotifier<EditorState> {
   void duplicateSelected() {
     final sel = _selected;
     if (sel == null) return;
-    final i = state.timeline.clips.indexOf(sel);
     final dup = Clip(
       id: 'clip_${DateTime.now().microsecondsSinceEpoch}',
       startMs: sel.startMs,
@@ -187,7 +186,21 @@ class EditorController extends StateNotifier<EditorState> {
       sourcePath: sel.sourcePath,
       hasAudio: sel.hasAudio,
     );
-    final next = [...state.timeline.clips]..insert(i + 1, dup);
+    // Insert AFTER the clip the playhead currently falls in (CapCut/VN style —
+    // the user scrubs to choose placement), not always right after the original.
+    // Append if the playhead is past the end.
+    final clips = state.timeline.clips;
+    var cursor = 0;
+    var insertAt = clips.length;
+    for (var i = 0; i < clips.length; i++) {
+      final pb = clips[i].playbackMs;
+      if (state.positionMs >= cursor && state.positionMs < cursor + pb) {
+        insertAt = i + 1;
+        break;
+      }
+      cursor += pb;
+    }
+    final next = [...clips]..insert(insertAt, dup);
     _commit(state.timeline.copyWith(clips: next), select: dup.id);
   }
 
@@ -195,6 +208,9 @@ class EditorController extends StateNotifier<EditorState> {
   /// distinct [sourcePath] (different from the project's original) is exported
   /// for real via the composer's multi-input path. Backward-compatible: a clip
   /// whose [sourcePath] equals the project source falls back to input 0.
+  ///
+  /// Product decision: freshly-imported footage APPENDS to the end (predictable),
+  /// whereas [duplicateSelected] inserts at the playhead (scrub to place).
   void addClip({required String sourcePath, required int sourceDurationMs, int track = 0, bool hasAudio = true}) {
     final newClip = Clip(
       id: 'clip_${DateTime.now().microsecondsSinceEpoch}',

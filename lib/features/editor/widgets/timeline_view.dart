@@ -8,7 +8,7 @@ import '../editor_theme.dart';
 
 /// Which kind of timeline item is currently highlighted (video clips are tracked
 /// via the provider's `selectedClipId`; these cover the read-through layers).
-enum _ItemKind { effect, audio, caption }
+enum _ItemKind { effect, audio, caption, text }
 
 /// Multi-track timeline (Twintra style): a shared time ruler above one row per
 /// video track index, then an effects row, one audio row per [AudioKind], and a
@@ -68,6 +68,7 @@ class _TimelineViewState extends State<TimelineView> {
       if (_t.effects.isNotEmpty) _effectsRow(),
       ..._audioRows(),
       if (_t.captions.isNotEmpty) _captionRow(),
+      if (_t.settings.texts.isNotEmpty) _textRow(),
     ];
     final playheadX = _x(widget.positionMs).clamp(0.0, _contentW);
     return Container(
@@ -280,6 +281,48 @@ class _TimelineViewState extends State<TimelineView> {
         ),
       ),
     );
+  }
+
+  /// Text overlays have no time range (full-duration), so pack them as small
+  /// labeled chips left→right. Tap selects (edit happens via canvas tap).
+  Widget _textRow() {
+    final chips = <Widget>[];
+    var x = 0.0;
+    for (final t in _t.settings.texts) {
+      final label = t.text.trim().isEmpty ? 'Text' : t.text.trim();
+      final w = math.min(math.max(label.length * 6.5 + 26, 46), 160).toDouble();
+      final selected = _selKind == _ItemKind.text && _selId == t.id;
+      chips.add(Positioned(
+        left: x,
+        top: 1,
+        height: _capH - 2,
+        width: w,
+        child: GestureDetector(
+          onTap: () => _selectItem(t.id, _ItemKind.text),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEC4899).withValues(alpha: 0.9), // magenta = text
+              borderRadius: BorderRadius.circular(5),
+              border: selected ? Border.all(color: Colors.white, width: 1.4) : null,
+            ),
+            alignment: Alignment.centerLeft,
+            child: Row(children: [
+              const Icon(Icons.text_fields_rounded, size: 11, color: Colors.white),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
+              ),
+            ]),
+          ),
+        ),
+      ));
+      x += w + 6;
+    }
+    return _rowFrame(_capH, chips);
   }
 
   Widget _layerBlock({
