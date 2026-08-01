@@ -381,17 +381,23 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
   /// The bottom toolbar changes with the current selection (CapCut-style). Only
   /// tools with a real action for that context are shown — no dead buttons.
   List<(IconData, String, VoidCallback)> _toolsFor(Selection sel, EditorState state) {
+    // Creation tools that stay reachable no matter what's selected, so selecting
+    // a clip never hides "Text" or "AI Tools" (they're project-level actions).
+    final always = <(IconData, String, VoidCallback)>[
+      (Icons.text_fields_rounded, 'Text', () => showTextSheet(context, _ctrl)),
+      (Icons.auto_fix_high_rounded, 'AI Tools', _openAiTools),
+    ];
     switch (sel.kind) {
       case SelectionKind.clip:
-        return _clipTools(state);
+        return [..._clipTools(state), ...always];
       case SelectionKind.text:
-        return _textTools();
+        return [..._textTools(), ...always];
       case SelectionKind.overlay:
-        return _overlayTools();
+        return [..._overlayTools(), ...always];
       case SelectionKind.none:
       case SelectionKind.caption:
       case SelectionKind.audioLayer:
-        return _globalTools(state);
+        return _globalTools(state); // already includes Text + AI Tools
     }
   }
 
