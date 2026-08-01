@@ -142,6 +142,110 @@ Future<void> showTrimSheet(BuildContext context, EditorController ctrl) {
   );
 }
 
+// ── Per-clip volume + fades ─────────────────────────────────────────────────
+/// Adjusts the SELECTED clip's own audio volume and fade in/out (distinct from
+/// the project-level Audio sheet, which owns master volume + music). Real per
+/// clip on export.
+Future<void> showClipVolumeSheet(BuildContext context, EditorController ctrl) {
+  if (ctrl.selectedClip == null) {
+    return edShowPanel(
+      context,
+      const EdPanel(
+        title: 'Volume',
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          child: Text('Select a clip.', style: TextStyle(color: Ed.muted)),
+        ),
+      ),
+    );
+  }
+  return edShowPanel(
+    context,
+    EdPanel(
+      title: 'Clip volume',
+      onReset: () {
+        ctrl.setClipVolume(1.0);
+        ctrl.setClipFadeIn(0);
+        ctrl.setClipFadeOut(0);
+      },
+      child: StatefulBuilder(builder: (context, setLocal) {
+        final c = ctrl.selectedClip;
+        if (c == null) return const SizedBox.shrink();
+        final maxFade = (c.playbackMs / 1000.0).clamp(0.5, 5.0);
+        return Column(mainAxisSize: MainAxisSize.min, children: [
+          EdSliderRow(
+            label: 'Volume',
+            value: c.volume,
+            min: 0,
+            max: 2,
+            valueFmt: (v) => '${(v * 100).round()}%',
+            trackGradient: const LinearGradient(colors: [Ed.amber1, Ed.amber2]),
+            onChanged: (v) => setLocal(() => ctrl.setClipVolume(v, record: false)),
+            onChangeEnd: (v) => ctrl.setClipVolume(v),
+          ),
+          const SizedBox(height: 12),
+          EdSliderRow(
+            label: 'Fade in',
+            value: (c.fadeInMs / 1000.0).clamp(0.0, maxFade),
+            min: 0,
+            max: maxFade,
+            valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+            onChanged: (v) => setLocal(() => ctrl.setClipFadeIn((v * 1000).round(), record: false)),
+            onChangeEnd: (v) => ctrl.setClipFadeIn((v * 1000).round()),
+          ),
+          EdSliderRow(
+            label: 'Fade out',
+            value: (c.fadeOutMs / 1000.0).clamp(0.0, maxFade),
+            min: 0,
+            max: maxFade,
+            valueFmt: (v) => '${v.toStringAsFixed(1)}s',
+            onChanged: (v) => setLocal(() => ctrl.setClipFadeOut((v * 1000).round(), record: false)),
+            onChangeEnd: (v) => ctrl.setClipFadeOut((v * 1000).round()),
+          ),
+        ]);
+      }),
+    ),
+  );
+}
+
+// ── Per-clip transform (rotate / flip) ──────────────────────────────────────
+Future<void> showClipTransformSheet(BuildContext context, EditorController ctrl) {
+  if (ctrl.selectedClip == null) {
+    return edShowPanel(
+      context,
+      const EdPanel(
+        title: 'Transform',
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          child: Text('Select a clip.', style: TextStyle(color: Ed.muted)),
+        ),
+      ),
+    );
+  }
+  return edShowPanel(
+    context,
+    EdPanel(
+      title: 'Transform',
+      onReset: ctrl.resetClipTransform,
+      child: StatefulBuilder(builder: (context, setLocal) {
+        final c = ctrl.selectedClip;
+        if (c == null) return const SizedBox.shrink();
+        return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: _bigPill('Rotate 90°', false, () => setLocal(ctrl.rotateClipQuarter))),
+            const SizedBox(width: 10),
+            Expanded(child: _bigPill('Flip H', c.flipH, () => setLocal(ctrl.toggleClipFlipH))),
+            const SizedBox(width: 10),
+            Expanded(child: _bigPill('Flip V', c.flipV, () => setLocal(ctrl.toggleClipFlipV))),
+          ]),
+          const SizedBox(height: 12),
+          Text('Rotation: ${(c.quarterTurns % 4) * 90}°', style: const TextStyle(color: Ed.muted, fontSize: 12)),
+        ]);
+      }),
+    ),
+  );
+}
+
 // ── Filter presets ────────────────────────────────────────────────────────────
 Future<void> showFilterSheet(BuildContext context, EditorController ctrl) {
   const order = FilterPreset.values;

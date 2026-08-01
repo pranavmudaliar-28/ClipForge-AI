@@ -328,6 +328,8 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         }),
         (Icons.straighten_rounded, 'Trim', () => showTrimSheet(context, _ctrl)),
         (Icons.speed_rounded, 'Speed', () => showSpeedSheet(context, _ctrl.selectedClip?.speed ?? 1.0, _ctrl.setSpeed)),
+        (Icons.volume_up_outlined, 'Volume', () => showClipVolumeSheet(context, _ctrl)),
+        (Icons.crop_rotate_rounded, 'Transform', () => showClipTransformSheet(context, _ctrl)),
         (Icons.copy_rounded, 'Duplicate', _ctrl.duplicateSelected),
         (Icons.delete_outline_rounded, 'Delete', _ctrl.deleteSelected),
         (Icons.auto_awesome_rounded, 'Filter', () => showFilterSheet(context, _ctrl)),
@@ -335,7 +337,6 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         (Icons.blur_on_rounded, 'Effects', () => showEffectsSheet(context, _ctrl)),
         (Icons.blur_circular_outlined, 'Cutout', () => showCutoutSheet(context, _ctrl)),
         (Icons.swap_horiz_rounded, 'Transition', () => showTransitionSheet(context, _ctrl)),
-        (Icons.volume_up_outlined, 'Volume', () => showAudioSheet(context, _ctrl)),
       ];
 
   // A text overlay is selected → edit / timing / duplicate / delete.
@@ -448,6 +449,16 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         content = const Center(child: CircularProgressIndicator(color: Ed.accent));
       }
 
+      // Reflect the active project-source clip's flip/rotate live (approximate;
+      // the single preview player can't show added-source clips — export is
+      // exact). Volume/fade are audio-only, so preview-exempt.
+      if (_ready && _video != null) {
+        final active = _activeClip(state);
+        if (active != null && (active.flipH || active.flipV || active.quarterTurns % 4 != 0)) {
+          content = _clipTransform(content, active);
+        }
+      }
+
       final textScale = (box.maxHeight.isFinite && box.maxHeight > 0 && canvas.exportH > 0)
           ? box.maxHeight / canvas.exportH
           : 0.2;
@@ -512,6 +523,30 @@ class _EditorScreenState extends ConsumerState<EditorScreen> {
         ]),
       );
     });
+  }
+
+  /// The clip under the playhead if it's a project-source clip (the only kind
+  /// the single preview player can show), else null.
+  Clip? _activeClip(EditorState state) {
+    final clips = state.timeline.clips;
+    if (clips.isEmpty) return null;
+    final c = clips[_clipIndexForOutput(state.positionMs, clips)];
+    return _isProjectSource(c) ? c : null;
+  }
+
+  /// Wraps the preview video with a clip's flip + 90° rotation (approximate).
+  Widget _clipTransform(Widget child, Clip c) {
+    var w = child;
+    final turns = c.quarterTurns % 4;
+    if (turns != 0) w = RotatedBox(quarterTurns: turns, child: w);
+    if (c.flipH || c.flipV) {
+      w = Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.diagonal3Values(c.flipH ? -1.0 : 1.0, c.flipV ? -1.0 : 1.0, 1.0),
+        child: w,
+      );
+    }
+    return w;
   }
 
   // ── Canvas text display + selection gizmo ────────────────────────────────────

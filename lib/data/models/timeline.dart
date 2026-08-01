@@ -17,6 +17,12 @@ class Clip {
     this.speed = 1.0,
     this.sourcePath,
     this.hasAudio = true,
+    this.volume = 1.0,
+    this.fadeInMs = 0,
+    this.fadeOutMs = 0,
+    this.flipH = false,
+    this.flipV = false,
+    this.quarterTurns = 0,
   });
 
   final String id;
@@ -36,20 +42,48 @@ class Clip {
   /// can synthesize silence for muted sources instead of failing concat.
   final bool hasAudio;
 
+  // --- Per-clip properties (Batch 2). All default to the pre-batch behaviour
+  //     so projects saved earlier load and export identically. ----------------
+  final double volume; // 0..2 per-clip audio gain
+  final int fadeInMs, fadeOutMs; // per-clip fade from/to black (video + audio)
+  final bool flipH, flipV; // mirror horizontally / vertically
+  final int quarterTurns; // 90° rotations, 0..3 (clockwise)
+
   int get durationMs => (endMs - startMs).clamp(0, 1 << 31);
 
   /// Duration on the timeline after the speed factor is applied.
   int get playbackMs => (durationMs / speed).round();
 
-  Clip copyWith({int? startMs, int? endMs, String? label, double? speed, String? sourcePath, bool? hasAudio}) => Clip(
+  Clip copyWith({
+    int? startMs,
+    int? endMs,
+    String? label,
+    int? track,
+    double? speed,
+    String? sourcePath,
+    bool? hasAudio,
+    double? volume,
+    int? fadeInMs,
+    int? fadeOutMs,
+    bool? flipH,
+    bool? flipV,
+    int? quarterTurns,
+  }) =>
+      Clip(
         id: id,
         startMs: startMs ?? this.startMs,
         endMs: endMs ?? this.endMs,
         label: label ?? this.label,
-        track: track,
+        track: track ?? this.track,
         speed: speed ?? this.speed,
         sourcePath: sourcePath ?? this.sourcePath,
         hasAudio: hasAudio ?? this.hasAudio,
+        volume: volume ?? this.volume,
+        fadeInMs: fadeInMs ?? this.fadeInMs,
+        fadeOutMs: fadeOutMs ?? this.fadeOutMs,
+        flipH: flipH ?? this.flipH,
+        flipV: flipV ?? this.flipV,
+        quarterTurns: quarterTurns ?? this.quarterTurns,
       );
 
   factory Clip.fromJson(Map<String, dynamic> j) => Clip(
@@ -61,6 +95,12 @@ class Clip {
         speed: (j['speed'] as num?)?.toDouble() ?? 1.0,
         sourcePath: j['sourcePath'] as String?,
         hasAudio: j['hasAudio'] as bool? ?? true,
+        volume: (j['volume'] as num?)?.toDouble() ?? 1.0,
+        fadeInMs: (j['fadeInMs'] as num?)?.toInt() ?? 0,
+        fadeOutMs: (j['fadeOutMs'] as num?)?.toInt() ?? 0,
+        flipH: j['flipH'] as bool? ?? false,
+        flipV: j['flipV'] as bool? ?? false,
+        quarterTurns: (j['quarterTurns'] as num?)?.toInt() ?? 0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -72,6 +112,12 @@ class Clip {
         'speed': speed,
         'sourcePath': sourcePath,
         'hasAudio': hasAudio,
+        'volume': volume,
+        'fadeInMs': fadeInMs,
+        'fadeOutMs': fadeOutMs,
+        'flipH': flipH,
+        'flipV': flipV,
+        'quarterTurns': quarterTurns,
       };
 }
 

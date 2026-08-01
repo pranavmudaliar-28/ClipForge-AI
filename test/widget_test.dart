@@ -144,5 +144,73 @@ void main() {
       expect(job.command.contains('subtitles='), true);
       await dir.delete(recursive: true);
     });
+
+    test('emits per-clip flip/rotate + volume/fade filters', () async {
+      final dir = await Directory.systemTemp.createTemp('cf_clip_test');
+      const timeline = Timeline(
+        durationMs: 4000,
+        clips: [
+          Clip(id: 'c0', startMs: 0, endMs: 4000, volume: 0.5, fadeInMs: 500, fadeOutMs: 500, flipH: true, quarterTurns: 1),
+        ],
+        captions: [],
+        effects: [],
+        audio: [],
+      );
+      final job = await FfmpegComposer.build(
+        sourcePath: '/tmp/in.mp4',
+        timeline: timeline,
+        canvas: CanvasPreset.all.first,
+        exportW: 1080,
+        exportH: 1920,
+        outputPath: '${dir.path}/out.mp4',
+        subtitlePath: '${dir.path}/s.ass',
+        watermark: false,
+      );
+      expect(job.command.contains('transpose=1'), true); // 90° rotation
+      expect(job.command.contains('hflip'), true);
+      expect(job.command.contains('volume=0.50'), true);
+      expect(job.command.contains('fade=t=in'), true); // video fade
+      expect(job.command.contains('afade=t=out'), true); // audio fade
+      await dir.delete(recursive: true);
+    });
+  });
+
+  group('Clip per-clip props', () {
+    test('round-trips new fields through JSON', () {
+      const c = Clip(
+        id: 'c',
+        startMs: 0,
+        endMs: 1000,
+        volume: 0.5,
+        fadeInMs: 300,
+        fadeOutMs: 400,
+        flipH: true,
+        flipV: false,
+        quarterTurns: 3,
+      );
+      final r = Clip.fromJson(c.toJson());
+      expect(r.volume, 0.5);
+      expect(r.fadeInMs, 300);
+      expect(r.fadeOutMs, 400);
+      expect(r.flipH, true);
+      expect(r.flipV, false);
+      expect(r.quarterTurns, 3);
+    });
+
+    test('old JSON without new keys defaults to identity transform', () {
+      final r = Clip.fromJson(const {'id': 'c', 'startMs': 0, 'endMs': 1000});
+      expect(r.volume, 1.0);
+      expect(r.fadeInMs, 0);
+      expect(r.fadeOutMs, 0);
+      expect(r.flipH, false);
+      expect(r.flipV, false);
+      expect(r.quarterTurns, 0);
+    });
+
+    test('copyWith can change track (needed for later multi-track batches)', () {
+      const c = Clip(id: 'c', startMs: 0, endMs: 1000);
+      expect(c.copyWith(track: 2).track, 2);
+      expect(c.copyWith().track, 0);
+    });
   });
 }

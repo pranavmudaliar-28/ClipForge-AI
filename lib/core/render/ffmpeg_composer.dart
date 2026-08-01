@@ -44,19 +44,17 @@ abstract final class FfmpegComposer {
     final multi = sources.length > 1;
     final inputs = <String>[for (final src in sources) "-i '$src'"];
 
-    // 1) Per-clip trim + speed + normalise to canvas.
+    // 1) Per-clip trim + speed + flip/rotate + fade + normalise to canvas.
     for (var i = 0; i < clips.length; i++) {
       final c = clips[i];
       final idx = clipInput[i];
       final inS = (c.startMs / 1000).toStringAsFixed(3);
       final outS = (c.endMs / 1000).toStringAsFixed(3);
-      final pts = c.speed == 1.0 ? '' : 'setpts=PTS/${c.speed},';
       // Video normalise (scale/crop/fps/format) already makes clips concat-safe
       // across sources; audio also needs resample+format when mixing sources so
       // concat doesn't fail on differing sample rates/layouts.
       final aNorm = multi ? ',aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo' : '';
-      f.add("[$idx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
-          "scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p[v$i]");
+      f.add(_clipVideo(c, idx, i, inS, outS, w, h));
       f.add(_clipAudio(c, idx, i, inS, outS, aNorm));
     }
 
@@ -181,10 +179,8 @@ abstract final class FfmpegComposer {
       final idx = clipInput[i];
       final inS = (c.startMs / 1000).toStringAsFixed(3);
       final outS = (c.endMs / 1000).toStringAsFixed(3);
-      final pts = c.speed == 1.0 ? '' : 'setpts=PTS/${c.speed},';
       final aNorm = multi ? ',aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo' : '';
-      f.add("[$idx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts"
-          "scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p[v$i]");
+      f.add(_clipVideo(c, idx, i, inS, outS, w, h));
       f.add(_clipAudio(c, idx, i, inS, outS, aNorm));
     }
     String vLab, aLab;
@@ -268,15 +264,70 @@ abstract final class FfmpegComposer {
     return (vPrev, aPrev);
   }
 
+  /// Per-clip video: trim + speed + flip/rotate + normalise to canvas + fade.
+  /// Flip/rotate go BEFORE scale/crop so the canvas is filled by the oriented
+  /// frame; fades go last so they act on the final composited clip frames.
+  static String _clipVideo(Clip c, int inputIdx, int labelIdx, String inS, String outS, int w, int h) {
+    final pts = c.speed == 1.0 ? '' : 'setpts=PTS/${c.speed},';
+    final orient = _orient(c);
+    final b = StringBuffer('[$inputIdx:v]trim=$inS:$outS,setpts=PTS-STARTPTS,$pts');
+    if (orient.isNotEmpty) b.write('$orient,');
+    b.write('scale=$w:$h:force_original_aspect_ratio=increase,crop=$w:$h,setsar=1,fps=30,format=yuv420p');
+    final fade = _videoFade(c);
+    if (fade.isNotEmpty) b.write(',$fade');
+    b.write('[v$labelIdx]');
+    return b.toString();
+  }
+
+  /// hflip / vflip / transpose chain for a clip's flip + 90° rotation.
+  static String _orient(Clip c) {
+    final parts = <String>[];
+    switch (c.quarterTurns % 4) {
+      case 1:
+        parts.add('transpose=1'); // 90° clockwise
+      case 2:
+        parts.add('transpose=2,transpose=2'); // 180°
+      case 3:
+        parts.add('transpose=2'); // 90° counter-clockwise
+    }
+    if (c.flipH) parts.add('hflip');
+    if (c.flipV) parts.add('vflip');
+    return parts.join(',');
+  }
+
+  /// Per-clip video fade from/to black (within the clip's own playback window).
+  static String _videoFade(Clip c) {
+    final parts = <String>[];
+    if (c.fadeInMs > 0) parts.add('fade=t=in:st=0:d=${(c.fadeInMs / 1000).toStringAsFixed(2)}');
+    if (c.fadeOutMs > 0) {
+      final st = math.max(0.0, (c.playbackMs - c.fadeOutMs) / 1000).toStringAsFixed(2);
+      parts.add('fade=t=out:st=$st:d=${(c.fadeOutMs / 1000).toStringAsFixed(2)}');
+    }
+    return parts.join(',');
+  }
+
+  /// Per-clip audio filters (volume + fades) appended after trim/atempo/norm.
+  static String _audioPost(Clip c) {
+    final parts = <String>[];
+    if (c.volume != 1.0) parts.add('volume=${c.volume.toStringAsFixed(2)}');
+    if (c.fadeInMs > 0) parts.add('afade=t=in:st=0:d=${(c.fadeInMs / 1000).toStringAsFixed(2)}');
+    if (c.fadeOutMs > 0) {
+      final st = math.max(0.0, (c.playbackMs - c.fadeOutMs) / 1000).toStringAsFixed(2);
+      parts.add('afade=t=out:st=$st:d=${(c.fadeOutMs / 1000).toStringAsFixed(2)}');
+    }
+    return parts.isEmpty ? '' : ',${parts.join(',')}';
+  }
+
   /// Per-clip audio: the source's audio when present, otherwise synthesized
   /// silence of the clip's output length so concat never fails on a muted clip.
   static String _clipAudio(Clip c, int inputIdx, int labelIdx, String inS, String outS, String aNorm) {
+    final post = _audioPost(c);
     if (c.hasAudio) {
-      return "[$inputIdx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm[a$labelIdx]";
+      return "[$inputIdx:a]atrim=$inS:$outS,asetpts=PTS-STARTPTS${_atempo(c.speed)}$aNorm$post[a$labelIdx]";
     }
     final durSec = (c.playbackMs / 1000).toStringAsFixed(3);
     return "anullsrc=r=44100:cl=stereo,atrim=0:$durSec,asetpts=PTS-STARTPTS,"
-        "aformat=sample_fmts=fltp:channel_layouts=stereo[a$labelIdx]";
+        "aformat=sample_fmts=fltp:channel_layouts=stereo$post[a$labelIdx]";
   }
 
   static String _atempo(double speed) {

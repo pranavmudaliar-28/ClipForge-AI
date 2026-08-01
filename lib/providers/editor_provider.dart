@@ -318,6 +318,33 @@ class EditorController extends StateNotifier<EditorState> {
     _commit(state.timeline.copyWith(clips: next));
   }
 
+  // --- per-clip properties (Batch 2: volume/fade/flip/rotate) ---------------
+  /// Replaces the selected clip via [transform]. [record]=false updates live
+  /// (slider drag) without an undo entry; call once with [record]=true on end.
+  void _updateSelectedClip(Clip Function(Clip) transform, {bool record = true}) {
+    final sel = selectedClip;
+    if (sel == null) return;
+    final next = state.timeline.clips.map((c) => c.id == sel.id ? transform(c) : c).toList();
+    final nextTimeline = state.timeline.copyWith(clips: next);
+    if (record) {
+      _commit(nextTimeline);
+    } else {
+      state = state.copyWith(timeline: nextTimeline);
+    }
+  }
+
+  void setClipVolume(double v, {bool record = true}) =>
+      _updateSelectedClip((c) => c.copyWith(volume: v.clamp(0.0, 2.0)), record: record);
+  void setClipFadeIn(int ms, {bool record = true}) =>
+      _updateSelectedClip((c) => c.copyWith(fadeInMs: ms < 0 ? 0 : ms), record: record);
+  void setClipFadeOut(int ms, {bool record = true}) =>
+      _updateSelectedClip((c) => c.copyWith(fadeOutMs: ms < 0 ? 0 : ms), record: record);
+  void rotateClipQuarter() => _updateSelectedClip((c) => c.copyWith(quarterTurns: (c.quarterTurns + 1) % 4));
+  void toggleClipFlipH() => _updateSelectedClip((c) => c.copyWith(flipH: !c.flipH));
+  void toggleClipFlipV() => _updateSelectedClip((c) => c.copyWith(flipV: !c.flipV));
+  void resetClipTransform() =>
+      _updateSelectedClip((c) => c.copyWith(quarterTurns: 0, flipH: false, flipV: false));
+
   // --- edit settings (color/filter/fx/text/audio/transition/cutout) ---------
   Timeline get timeline => state.timeline;
   EditSettings get settings => state.timeline.settings;
